@@ -235,7 +235,10 @@ def drop_partial_bar(df, market: str):
 # 2. 시세 다운로드
 # --------------------------------------------------------------------------
 def download_prices(tickers, start, end, chunk=60, use_cache=True):
-    """티커별 OHLCV DataFrame(dict) 반환. 청크 단위로 받고 실패분은 1회 재시도."""
+    """티커별 OHLCV DataFrame(dict) 반환.
+
+    묶음으로 두 번 받아보고, 그래도 빠진 종목은 개별 요청으로 한 번 더 시도한다.
+    """
     cache_path = None
     if use_cache:
         key = hashlib.md5(
@@ -293,6 +296,37 @@ def download_prices(tickers, start, end, chunk=60, use_cache=True):
         if not pending:
             break
         time.sleep(2)
+
+    # 묶음으로 두 번 다 실패한 종목은 하나씩 다시 받아본다.
+    # 배치 실패는 대개 묶음 단위 문제(스로틀링, 한 종목이 응답을 망침)라
+    # 개별 요청으로는 대부분 살아난다. 조용히 빠지면 신호를 놓친다.
+    if pending:
+        recovered = set()
+        for i, t in enumerate(pending, 1):
+            print(f"  개별 재시도 {i}/{len(pending)} {t}", end="\r", flush=True)
+            for delay in (0, 2):
+                if delay:
+                    time.sleep(delay)
+                try:
+                    df = yf.download(t, start=start, end=end + timedelta(days=1),
+                                     interval="1d", auto_adjust=False, actions=False,
+                                     progress=False, threads=False)
+                except Exception:
+                    continue
+                if isinstance(df.columns, pd.MultiIndex):
+                    try:
+                        df = df[t]
+                    except KeyError:
+                        df = df.droplevel(-1, axis=1)
+                df = df.dropna(subset=["Close", "Volume"])
+                if not df.empty:
+                    out[t] = df
+                    recovered.add(t)
+                    break
+        print(" " * 60, end="\r")
+        if recovered:
+            print(f"  개별 재시도로 {len(recovered)}종목 복구")
+        pending = [t for t in pending if t not in recovered]
 
     if pending:
         head = ", ".join(pending[:15])
