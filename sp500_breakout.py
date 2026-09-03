@@ -498,9 +498,17 @@ def write_html(charts, args, markets, out_path: Path):
     artifact_path = out_path.with_suffix(".artifact.html")
     artifact_path.write_text(fragment, encoding="utf-8")
 
+    # 홈 화면 아이콘은 head 에 있어야 iOS 가 인식한다. 없으면 페이지를 축소한
+    # 스크린샷을 아이콘으로 써서 알아보기 어렵다.
     standalone = (
         '<!doctype html>\n<html lang="ko">\n<head>\n<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        '<link rel="apple-touch-icon" href="apple-touch-icon.png">\n'
+        '<link rel="icon" type="image/png" sizes="32x32" href="favicon.png">\n'
+        '<link rel="icon" type="image/png" sizes="512x512" href="icon-512.png">\n'
+        '<meta name="apple-mobile-web-app-title" content="돌파 스크린">\n'
+        '<meta name="theme-color" media="(prefers-color-scheme: light)" content="#EEF1F2">\n'
+        '<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0E1315">\n'
         "</head>\n<body>\n" + fragment + "\n</body>\n</html>\n"
     )
     out_path.write_text(standalone, encoding="utf-8")

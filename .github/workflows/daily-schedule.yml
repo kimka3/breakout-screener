@@ -48,6 +48,9 @@ jobs:
           mkdir -p public
           cp report.html public/index.html
           cp breakouts_20d.csv public/breakouts.csv
+          # 홈 화면 아이콘 — 저장소에 커밋된 것을 그대로 배포한다
+          cp apple-touch-icon.png favicon.png icon-512.png public/
+          ls -l public/
 
       - uses: actions/upload-artifact@v4
         with:
