@@ -564,9 +564,21 @@ def main() -> int:
                                  use_cache=not args.no_cache)
         n_failed = len(getattr(download_prices, "last_failed", []) or [])
         prices = {t: drop_partial_bar(df, mk) for t, df in prices.items()}
+        # 과거 데이터가 짧으면 이동평균이 계산되지 않아 신호가 조용히 사라진다.
+        # MA 는 앞선 ma 봉이 있어야 나오므로, 검색 구간 전체를 평가하려면
+        # ma + lookback 봉이 필요하다. 그에 못 미치는 종목을 따로 센다.
+        need_full = args.ma + args.lookback
+        n_no_hist = sum(1 for df in prices.values() if len(df) <= args.ma)
         prices = {t: df for t, df in prices.items() if len(df) > args.ma}
+        short = {t: len(df) for t, df in prices.items() if len(df) < need_full}
         print(f"[{spec['label']}] 시세 확보 {len(prices)}종목"
-              + (f" (다운로드 실패 {n_failed}종목 — 이 종목들은 스캔에서 빠집니다)" if n_failed else ""))
+              + (f" (다운로드 실패 {n_failed}종목 — 스캔 제외)" if n_failed else ""))
+        if n_no_hist:
+            print(f"[{spec['label']}] 이력이 MA{args.ma} 에 못 미쳐 제외 {n_no_hist}종목")
+        if short:
+            sample = ", ".join(f"{t}({n}봉)" for t, n in list(short.items())[:8])
+            print(f"[{spec['label']}] 이력이 짧아 검색 구간 일부만 평가됨 {len(short)}종목: {sample}"
+                  + (" ..." if len(short) > 8 else ""))
         if not prices:
             print(f"[warn] {spec['label']} 시세를 받지 못해 건너뜁니다.", file=sys.stderr)
             continue
@@ -628,6 +640,8 @@ def main() -> int:
             "latest": str(latest.date()),
             "scanned": len(prices),
             "failed": n_failed,
+            "noHistory": n_no_hist,
+            "shortHistory": len(short),
             "stale": n_stale,
             "hits": len(rows) - n_before,
         })

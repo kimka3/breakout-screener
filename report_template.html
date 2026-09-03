@@ -623,7 +623,9 @@ function header() {
   document.getElementById("asof").textContent =
     "기준 거래일 " + (m.latest || "—") + " · 최근 " + DATA.lookback + "거래일 검색 · 생성 " + DATA.generatedAt +
     (m.stale ? " · " + m.stale + "종목은 마지막 봉 날짜가 다름" : "") +
-    (m.failed ? " · 다운로드 실패 " + m.failed + "종목은 스캔 제외" : "");
+    (m.failed ? " · 다운로드 실패 " + m.failed + "종목은 스캔 제외" : "") +
+    (m.noHistory ? " · 이력 부족 " + m.noHistory + "종목 제외" : "") +
+    (m.shortHistory ? " · 이력이 짧아 일부만 평가된 " + m.shortHistory + "종목" : "");
 
   const hits = DATA.hits.filter(h => h.market === curMarket);
   document.getElementById("stats").innerHTML = [
