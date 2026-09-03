@@ -1,0 +1,61 @@
+name: Daily breakout screen
+
+on:
+  schedule:
+    # 23:00 UTC = 다음날 08:00 KST. 미국장 마감(05:00 KST) 후,
+    # 한국장 개장(09:00 KST) 전이라 양쪽 모두 전일 봉이 확정된 시각.
+    - cron: "0 23 * * *"
+  workflow_dispatch:        # 수동 실행 버튼
+
+permissions:
+  contents: write           # 생성된 리포트를 gh-pages 로 밀어넣기 위해 필요
+
+concurrency:
+  group: daily-screen
+  cancel-in-progress: false
+
+jobs:
+  screen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: 스크리너 실행
+        run: python sp500_breakout.py --lookback 20 --html report.html --out breakouts_20d.csv
+
+      - name: 결과 확인
+        run: |
+          test -s report.html || { echo "report.html 이 비어 있음"; exit 1; }
+          echo "생성 크기: $(wc -c < report.html) bytes"
+          head -c 400 breakouts_20d.csv
+
+      - name: 페이지용 폴더 구성
+        run: |
+          mkdir -p public
+          cp report.html public/index.html
+          cp breakouts_20d.csv public/breakouts.csv
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screen-output
+          path: |
+            report.html
+            breakouts_20d.csv
+          retention-days: 14
+
+      - name: GitHub Pages 로 배포
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
+          publish_branch: gh-pages
