@@ -1,7 +1,4 @@
 <title>120일선 돌파 스크린</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+KR:wght@400;500;600&display=swap">
 
 <style>
 :root {
@@ -19,9 +16,15 @@
   --down:        #B3261E;
   --shadow:      0 1px 2px rgba(20, 27, 30, .05), 0 6px 20px -12px rgba(20, 27, 30, .22);
 
-  --font-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
-  --font-ui: "IBM Plex Sans KR", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
-  --font-mono: "IBM Plex Mono", ui-monospace, "Consolas", monospace;
+  /* 애플 시스템 폰트(SF Pro / Apple SD Gothic Neo)를 우선 쓰고,
+     윈도우·안드로이드에서는 각 OS 기본 한글 서체로 자연스럽게 떨어진다.
+     웹폰트를 받지 않으므로 휴대폰에서 첫 렌더가 빠르고 글자 밀림이 없다. */
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display",
+                  "Apple SD Gothic Neo", "Segoe UI", "Malgun Gothic", sans-serif;
+  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+             "Apple SD Gothic Neo", "Segoe UI", "Malgun Gothic", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo,
+               "Consolas", "D2Coding", monospace;
 }
 
 @media (prefers-color-scheme: dark) {
