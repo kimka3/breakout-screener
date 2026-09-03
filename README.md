@@ -59,7 +59,7 @@ python sp500_breakout.py --lookback 20 --html
 
 ## 자동 실행
 
-GitHub Actions 가 매일 `23:00 UTC`(= 다음날 `08:00 KST`)에 스크리너를 돌려
+GitHub Actions 가 매일 `22:37 UTC`(= 다음날 `07:37 KST`)에 스크리너를 돌려
 결과를 `gh-pages` 브랜치로 배포합니다. PC 를 켜두지 않아도 갱신됩니다.
 
 - 워크플로: `.github/workflows/daily-schedule.yml`
@@ -68,6 +68,9 @@ GitHub Actions 가 매일 `23:00 UTC`(= 다음날 `08:00 KST`)에 스크리너�
 
 실행 시각은 미국장 마감(05:00 KST) 이후, 한국장 개장(09:00 KST) 이전이라
 양쪽 시장 모두 전일 봉이 확정된 상태에서 스캔합니다.
+
+분 단위를 정각에서 어긋내 둔 것은 의도적입니다. GitHub 예약 실행은 정각에
+요청이 몰려 대기열이 길어지고, 그만큼 실제 실행이 밀립니다.
 
 > 클라우드 실행은 GitHub Actions 만 가능합니다. Claude 클라우드 루틴은
 > 아웃바운드 허용 목록에 패키지 저장소와 Anthropic API 만 있어
