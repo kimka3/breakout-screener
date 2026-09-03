@@ -11,3 +11,6 @@ __pycache__/
 
 # 이 PC 전용 권한 설정 — 절대경로가 들어있어 공유하지 않는다
 .claude/settings.local.json
+
+# 알림용 요약 (생성물)
+summary.txt

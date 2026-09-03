@@ -469,6 +469,46 @@ def build_series(df, sig_row, args, ticker, name, sector, market="sp500"):
     }
 
 
+PAGES_URL = "https://kimka3.github.io/breakout-screener/"
+
+
+def write_summary(rows, markets, args, out_path: Path, top=8):
+    """텔레그램 등으로 보낼 짧은 텍스트 요약.
+
+    종목이 많아도 메시지가 길어지지 않도록 시장별 상위 몇 개만 싣고,
+    나머지는 개수로만 알린다. 자세한 건 링크에서 본다.
+    """
+    when = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M")
+    lines = [f"[120일선 돌파 스크린] {when} KST", ""]
+
+    for m in markets:
+        hits = [r for r in rows if r["market"] == m["id"]]
+        head = f"{m['label']} · 기준 {m['latest']} · {len(hits)}건"
+        if m.get("degraded"):
+            head += "  ※ 데이터 결손으로 신뢰 불가"
+        lines.append(head)
+
+        if not hits:
+            lines.append("  해당 없음")
+        else:
+            dec = m["decimals"]
+            for r in sorted(hits, key=lambda x: -x["vol_ratio"])[:top]:
+                ret = r["return_since_%"]
+                lines.append(
+                    f"  {r['ticker']} {r['name'][:14]}"
+                    f"  {r['vol_ratio']:.2f}x"
+                    f"  {r['last_close']:,.{dec}f}"
+                    f"  ({ret:+.1f}%)"
+                )
+            if len(hits) > top:
+                lines.append(f"  … 외 {len(hits) - top}건")
+        lines.append("")
+
+    lines.append(PAGES_URL)
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"요약: {out_path.resolve()}")
+
+
 def write_html(charts, args, markets, out_path: Path):
     """템플릿에 데이터를 주입해 리포트 2종(단독 실행용 / 아티팩트용)을 쓴다.
 
@@ -538,6 +578,8 @@ def main() -> int:
     p.add_argument("--out", default="breakouts.csv", help="결과 CSV 경로")
     p.add_argument("--html", nargs="?", const="report.html", default=None,
                    help="휴대폰용 HTML 리포트 생성 (경로 생략시 report.html)")
+    p.add_argument("--summary", default=None,
+                   help="알림용 텍스트 요약 파일 경로 (텔레그램 등)")
     p.add_argument("--no-cache", action="store_true", help="시세 캐시를 쓰지 않고 새로 받기")
     p.add_argument("--no-hold", action="store_true",
                    help="돌파 후 현재가가 이동평균선 아래로 다시 내려간 종목도 포함")
@@ -702,6 +744,8 @@ def main() -> int:
         print("\n조건을 만족하는 종목이 없습니다.")
         if args.html:
             write_html([], args, market_summaries, Path(args.html))
+        if args.summary:
+            write_summary([], market_summaries, args, Path(args.summary))
         return 0
 
     funda = fetch_fundamentals(sorted({r["_y"] for r in rows}))
@@ -734,6 +778,8 @@ def main() -> int:
     if args.html:
         charts.sort(key=lambda c: (c["date"], c["volRatio"]), reverse=True)
         write_html(charts, args, market_summaries, Path(args.html))
+    if args.summary:
+        write_summary(rows, market_summaries, args, Path(args.summary))
     return 0
 
 

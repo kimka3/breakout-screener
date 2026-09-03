@@ -35,13 +35,16 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: 스크리너 실행
-        run: python sp500_breakout.py --lookback 20 --html report.html --out breakouts_20d.csv
+        run: |
+          python sp500_breakout.py --lookback 20 \
+            --html report.html --out breakouts_20d.csv --summary summary.txt
 
       - name: 결과 확인
         run: |
           test -s report.html || { echo "report.html 이 비어 있음"; exit 1; }
+          test -s summary.txt || { echo "summary.txt 이 비어 있음"; exit 1; }
           echo "생성 크기: $(wc -c < report.html) bytes"
-          head -c 400 breakouts_20d.csv
+          cat summary.txt
 
       - name: 페이지용 폴더 구성
         run: |
@@ -58,6 +61,7 @@ jobs:
           path: |
             report.html
             breakouts_20d.csv
+            summary.txt
           retention-days: 14
 
       - name: GitHub Pages 로 배포
@@ -66,3 +70,40 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./public
           publish_branch: gh-pages
+
+      # 성공이든 실패든 알린다. 조용히 실패하면 오래된 리포트를 최신으로 착각하게 된다.
+      - name: 텔레그램 알림
+        if: always()
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$TG_TOKEN" ] || [ -z "$TG_CHAT" ]; then
+            echo "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 시크릿이 없어 알림을 건너뜁니다."
+            exit 0
+          fi
+
+          if [ "$JOB_STATUS" = "success" ] && [ -s summary.txt ]; then
+            TEXT="$(cat summary.txt)"
+          else
+            TEXT="[120일선 돌파 스크린] 실행 실패 ($JOB_STATUS)
+          리포트가 갱신되지 않았습니다. 이전 결과는 그대로입니다.
+          $RUN_URL"
+          fi
+
+          # --data-urlencode 로 넘겨 줄바꿈과 특수문자가 깨지지 않게 한다.
+          # 토큰은 URL 에만 쓰고 출력하지 않는다.
+          code=$(curl -sS -o /tmp/tg.json -w '%{http_code}' \
+            -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TG_CHAT}" \
+            --data-urlencode "text=${TEXT}" \
+            --data-urlencode "disable_web_page_preview=true")
+
+          if [ "$code" != "200" ]; then
+            echo "텔레그램 전송 실패 (HTTP $code)"
+            sed -e "s/${TG_TOKEN}/***/g" /tmp/tg.json || true
+            exit 1
+          fi
+          echo "텔레그램 전송 완료"
