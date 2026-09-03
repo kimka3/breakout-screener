@@ -298,6 +298,7 @@ def download_prices(tickers, start, end, chunk=60, use_cache=True):
         head = ", ".join(pending[:15])
         more = " ..." if len(pending) > 15 else ""
         print(f"[warn] 데이터 실패 {len(pending)}종목: {head}{more}", file=sys.stderr)
+    download_prices.last_failed = list(pending)
 
     if cache_path is not None and out:
         try:
@@ -446,7 +447,7 @@ def write_html(charts, args, markets, out_path: Path):
         return
 
     payload = {
-        "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "generatedAt": datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M") + " KST",
         "markets": markets,
         "maPeriod": args.ma,
         "volWindow": args.vol_window,
@@ -527,9 +528,11 @@ def main() -> int:
         print(f"\n[{spec['label']}] 대상 {len(meta)}종목")
         prices = download_prices(meta["yahoo"].tolist(), start_date, end_date,
                                  use_cache=not args.no_cache)
+        n_failed = len(getattr(download_prices, "last_failed", []) or [])
         prices = {t: drop_partial_bar(df, mk) for t, df in prices.items()}
         prices = {t: df for t, df in prices.items() if len(df) > args.ma}
-        print(f"[{spec['label']}] 시세 확보 {len(prices)}종목")
+        print(f"[{spec['label']}] 시세 확보 {len(prices)}종목"
+              + (f" (다운로드 실패 {n_failed}종목 — 이 종목들은 스캔에서 빠집니다)" if n_failed else ""))
         if not prices:
             print(f"[warn] {spec['label']} 시세를 받지 못해 건너뜁니다.", file=sys.stderr)
             continue
@@ -590,6 +593,7 @@ def main() -> int:
             "decimals": spec["decimals"],
             "latest": str(latest.date()),
             "scanned": len(prices),
+            "failed": n_failed,
             "stale": n_stale,
             "hits": len(rows) - n_before,
         })
