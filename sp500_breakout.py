@@ -586,6 +586,45 @@ def main() -> int:
         # 기준 거래일은 최댓값이 아니라 최빈값으로 잡는다. 한두 종목이 남들보다
         # 하루 앞선 봉을 갖고 있는 경우가 있어, 최댓값을 쓰면 헤더에 찍히는 날짜가
         # 정작 대부분 종목의 데이터보다 하루 앞서게 된다.
+        # 야후가 종목에 따라 거래일을 통째로 빠뜨리는 일이 있다(환경에 따라 다르다).
+        # 빠진 날이 검색 구간 안에 있으면 "전일 아래 → 당일 위" 가 실제로는
+        # 없었는데 있는 것처럼 보여 가짜 돌파가 만들어진다. 놓치는 것보다 나쁘다.
+        # 전 종목의 날짜 분포로 그 시장의 거래일 달력을 만들어 대조한다.
+        day_count = Counter()
+        for df in prices.values():
+            day_count.update(df.index.normalize())
+        # 기준은 "다수결"이 아니라 "존재 증거"다. 어느 날짜가 소수 종목에만
+        # 있더라도 그건 실제 거래일이고, 없는 쪽이 결손이다. 다수결로 잡으면
+        # 결손이 광범위할 때 그 날짜가 달력에서 통째로 사라져 탐지가 무력해진다.
+        # 같은 시장의 서로 다른 종목 여러 개가 같은 날짜를 갖고 있다면 실제 거래일이다.
+        # 기준을 높이면 결손이 심할수록 그 날짜가 달력에서 사라져 탐지가 무력해진다.
+        quorum = max(5, int(len(prices) * 0.03))
+        calendar = sorted(d for d, n in day_count.items() if n >= quorum)
+        check_days = calendar[-(args.lookback + args.vol_window + 2):]
+        gapped = []
+        for t, df in prices.items():
+            have = set(df.index.normalize())
+            first = df.index.min()
+            if any(d not in have for d in check_days if d >= first):
+                gapped.append(t)
+
+        degraded = len(gapped) > len(prices) * 0.2
+        if gapped and not degraded:
+            sample = ", ".join(gapped[:8]) + (" ..." if len(gapped) > 8 else "")
+            print(f"[{spec['label']}] 거래일 누락으로 제외 {len(gapped)}종목: {sample}")
+            prices = {t: df for t, df in prices.items() if t not in set(gapped)}
+        elif degraded:
+            # 이 정도면 종목이 아니라 실행 환경의 문제다. 개별 제외는 의미가 없고
+            # (대부분이 빠진다) 그대로 두면 없던 교차가 신호로 잡힌다. 결과 전체에
+            # 신뢰 불가 표시를 단다.
+            miss = sorted({d.date().isoformat() for t in gapped
+                           for d in check_days if d not in set(prices[t].index.normalize())})
+            print(f"[{spec['label']}] ★ 거래일 결손이 광범위합니다: "
+                  f"{len(gapped)}/{len(prices)}종목. 빠진 날짜: {', '.join(miss[:5])}"
+                  + (" ..." if len(miss) > 5 else ""), file=sys.stderr)
+            print(f"[{spec['label']}] ★ 없던 교차가 신호로 잡힐 수 있어 이 결과는 "
+                  f"신뢰할 수 없습니다.", file=sys.stderr)
+
         last_dates = Counter(df.index.max().normalize() for df in prices.values())
         latest, n_at_latest = last_dates.most_common(1)[0]
         n_stale = len(prices) - n_at_latest
@@ -642,6 +681,8 @@ def main() -> int:
             "failed": n_failed,
             "noHistory": n_no_hist,
             "shortHistory": len(short),
+            "gapped": len(gapped),
+            "degraded": bool(degraded),
             "stale": n_stale,
             "hits": len(rows) - n_before,
         })

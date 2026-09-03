@@ -108,6 +108,15 @@ h1 {
 }
 .formula b { color: var(--ink); font-weight: 600; }
 .formula .n { font-family: var(--font-mono); font-weight: 500; color: var(--accent); }
+.degraded {
+  margin-top: 10px;
+  padding: 9px 12px;
+  border-left: 3px solid var(--down);
+  background: var(--surface);
+  border-radius: 0 6px 6px 0;
+  font-size: 12.5px;
+  color: var(--ink);
+}
 .asof {
   margin-top: 13px;
   font-family: var(--font-mono);
@@ -536,6 +545,7 @@ footer code {
       <div id="f-hold" hidden><b>3</b> &nbsp;현재가도 <span class="n" id="f-hold-ma">120일선</span> 위를 유지</div>
     </div>
     <p class="asof" id="asof"></p>
+    <p class="degraded" id="degraded" hidden></p>
   </header>
 
   <section class="stats" id="stats"></section>
@@ -625,7 +635,16 @@ function header() {
     (m.stale ? " · " + m.stale + "종목은 마지막 봉 날짜가 다름" : "") +
     (m.failed ? " · 다운로드 실패 " + m.failed + "종목은 스캔 제외" : "") +
     (m.noHistory ? " · 이력 부족 " + m.noHistory + "종목 제외" : "") +
-    (m.shortHistory ? " · 이력이 짧아 일부만 평가된 " + m.shortHistory + "종목" : "");
+    (m.shortHistory ? " · 이력이 짧아 일부만 평가된 " + m.shortHistory + "종목" : "") +
+    (m.gapped && !m.degraded ? " · 거래일 누락 " + m.gapped + "종목 제외" : "");
+  const warn = document.getElementById("degraded");
+  if (m.degraded) {
+    warn.hidden = false;
+    warn.textContent = "이 실행의 시세 데이터에 거래일이 광범위하게 빠져 있습니다 ("
+      + m.gapped + "/" + m.scanned + "종목). 없던 돌파가 신호로 잡혔을 수 있어 결과를 신뢰할 수 없습니다.";
+  } else {
+    warn.hidden = true;
+  }
 
   const hits = DATA.hits.filter(h => h.market === curMarket);
   document.getElementById("stats").innerHTML = [
