@@ -59,7 +59,7 @@ python sp500_breakout.py --lookback 20 --html
 
 ## 자동 실행
 
-GitHub Actions 가 매일 `22:37 UTC`(= 다음날 `07:37 KST`)에 스크리너를 돌려
+GitHub Actions 가 매일 `21:11 UTC`(= 다음날 `06:11 KST`)에 스크리너를 돌려
 결과를 `gh-pages` 브랜치로 배포합니다. PC 를 켜두지 않아도 갱신됩니다.
 
 - 워크플로: `.github/workflows/daily-schedule.yml`
