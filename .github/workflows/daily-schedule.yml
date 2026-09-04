@@ -80,10 +80,30 @@ jobs:
           JOB_STATUS: ${{ job.status }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          # 붙여넣기 과정에서 끼어든 줄바꿈·공백을 털어낸다.
+          # 토큰에 개행이 하나만 섞여도 URL 이 깨져 curl 이 exit 3 으로 죽는다.
+          TG_TOKEN="$(printf '%s' "$TG_TOKEN" | tr -d '[:space:]')"
+          TG_CHAT="$(printf '%s' "$TG_CHAT" | tr -d '[:space:]')"
+
           if [ -z "$TG_TOKEN" ] || [ -z "$TG_CHAT" ]; then
-            echo "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 시크릿이 없어 알림을 건너뜁니다."
+            echo "시크릿이 없어 알림을 건너뜁니다."
+            echo "  TELEGRAM_BOT_TOKEN : ${#TG_TOKEN} 자"
+            echo "  TELEGRAM_CHAT_ID   : ${#TG_CHAT} 자"
+            echo "  https://github.com/${GITHUB_REPOSITORY}/settings/secrets/actions 에서 등록하세요."
             exit 0
           fi
+
+          # 토큰 형식: <숫자>:<문자열>. 값 자체는 찍지 않고 길이만 남긴다.
+          case "$TG_TOKEN" in
+            *:*) : ;;
+            *)
+              echo "TELEGRAM_BOT_TOKEN 형식이 잘못됐습니다."
+              echo "  '숫자:문자열' 형태여야 합니다 (예: 8123456789:AAH...)"
+              echo "  현재 길이 ${#TG_TOKEN} 자, 콜론 없음"
+              echo "  BotFather 가 준 값을 'bot' 접두사나 따옴표 없이 그대로 넣으세요."
+              exit 1
+              ;;
+          esac
 
           if [ "$JOB_STATUS" = "success" ] && [ -s summary.txt ]; then
             TEXT="$(cat summary.txt)"
@@ -93,17 +113,30 @@ jobs:
           $RUN_URL"
           fi
 
-          # --data-urlencode 로 넘겨 줄바꿈과 특수문자가 깨지지 않게 한다.
-          # 토큰은 URL 에만 쓰고 출력하지 않는다.
+          # curl 실패를 자체 메시지로 바꿔 준다. 기본값 그대로면 exit 3 같은
+          # 숫자만 남아 원인을 알 수 없다.
+          set +e
           code=$(curl -sS -o /tmp/tg.json -w '%{http_code}' \
             -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${TG_CHAT}" \
             --data-urlencode "text=${TEXT}" \
             --data-urlencode "disable_web_page_preview=true")
+          rc=$?
+          set -e
+
+          if [ "$rc" -ne 0 ]; then
+            echo "curl 자체가 실패했습니다 (exit $rc)."
+            [ "$rc" = "3" ] && echo "  exit 3 = URL 형식 오류. 토큰에 이상한 문자가 섞여 있습니다."
+            [ "$rc" = "6" ] && echo "  exit 6 = 주소를 찾지 못함. 네트워크 문제입니다."
+            exit 1
+          fi
 
           if [ "$code" != "200" ]; then
-            echo "텔레그램 전송 실패 (HTTP $code)"
-            sed -e "s/${TG_TOKEN}/***/g" /tmp/tg.json || true
+            echo "텔레그램이 요청을 거부했습니다 (HTTP $code)"
+            cat /tmp/tg.json 2>/dev/null || true
+            echo ""
+            echo "  401 → 토큰이 틀렸습니다"
+            echo "  400 + 'chat not found' → 챗ID 가 틀렸거나, 봇에게 먼저 말을 걸지 않았습니다"
             exit 1
           fi
           echo "텔레그램 전송 완료"
