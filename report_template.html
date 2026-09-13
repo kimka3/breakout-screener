@@ -14,6 +14,7 @@
   --accent-soft: #F3E5D2;
   --confirm:     #186B52;
   --down:        #B3261E;
+  --latest:      #315B9B;
   --shadow:      0 1px 2px rgba(20, 27, 30, .05), 0 6px 20px -12px rgba(20, 27, 30, .22);
 
   /* 애플 시스템 폰트(SF Pro / Apple SD Gothic Neo)를 우선 쓰고,
@@ -41,6 +42,7 @@
     --accent-soft: #3A2C17;
     --confirm:     #4FBE99;
     --down:        #F2837A;
+    --latest:      #8EB8F5;
     --shadow:      0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px -14px rgba(0, 0, 0, .7);
   }
 }
@@ -57,6 +59,7 @@
   --accent-soft: #3A2C17;
   --confirm:     #4FBE99;
   --down:        #F2837A;
+  --latest:      #8EB8F5;
   --shadow:      0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px -14px rgba(0, 0, 0, .7);
 }
 
@@ -73,6 +76,9 @@
 .monthly-audit table { font-size: 11px; }
 .monthly-audit th, .monthly-audit td { padding: 5px 8px; }
 .monthly-note { margin: 8px 0 0; color: var(--ink-3); font-size: 11px; }
+.latest-close { margin-top: 13px; padding: 8px 10px; border: 1px dashed var(--latest); border-radius: 7px; color: var(--ink-2); font-size: 11px; }
+.latest-close strong { color: var(--latest); font-family: var(--font-mono); font-size: 13px; }
+.latest-price-label { font: 11px var(--font-ui); fill: var(--latest); paint-order: stroke; stroke: var(--surface); stroke-width: 4px; stroke-linejoin: round; }
 
 body {
   background: var(--ground);
@@ -644,6 +650,20 @@ const priceBasis = (h = {}) => h.priceBasis || SCREEN.priceBasis || "raw";
 const priceLabel = (h = {}) => priceBasis(h) === "adj" ? "수정종가" : "종가";
 const signalClose = (h) => h.signalClose ?? h.close;
 const lastSignalClose = (h) => h.lastSignalClose ?? h.lastClose;
+const latestSignalPrice = (h) => {
+  const value = h.latestSignalClose ?? (priceBasis(h) === "raw" ? h.latestClose : null);
+  return Number.isFinite(value) && value > 0 && typeof h.latestDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(h.latestDate) ? value : null;
+};
+const monthlyVolumeWindow = () => Number.isInteger(SCREEN.volWindow) && SCREEN.volWindow > 0 ? SCREEN.volWindow : 3;
+function priorMonthLabels(target, count) {
+  const match = typeof target === "string" && target.match(/^(\d{4})-(\d{2})/);
+  if (!match || Number(match[2]) < 1 || Number(match[2]) > 12) return [];
+  const current = Number(match[1]) * 12 + Number(match[2]) - 1;
+  return Array.from({ length: count }, (_, i) => {
+    const month = current - count + i;
+    return Math.floor(month / 12) + "-" + String(month % 12 + 1).padStart(2, "0");
+  });
+}
 const signalIndex = (h) => Number.isInteger(h.sigIndex) && h.sigIndex >= 0 && h.sigIndex < h.closes.length ? h.sigIndex : null;
 const rawPriceHTML = (chosen, raw, h) => Number.isFinite(chosen) && Number.isFinite(raw) && Math.abs(chosen - raw) > 0.00001
   ? `<small class="raw-price">실제 ${px(raw, h)}</small>` : "";
@@ -670,25 +690,25 @@ function configureScreen() {
   document.getElementById("f-line2").textContent = monthly
     ? "직전 " + below + "개월 각각의 종가 < 해당 월의 " + maLabel() + " (같으면 제외)"
     : "돌파일 거래량 ≥ 직전 " + SCREEN.volWindow + "거래일 평균 × " + SCREEN.volMult;
-  document.getElementById("f-hold").hidden = monthly || !SCREEN.requireHold;
+  document.getElementById("f-hold").hidden = !monthly && !SCREEN.requireHold;
   document.getElementById("f-line3").textContent = monthly
-    ? ""
+    ? "판정 월 총거래량 > 직전 " + monthlyVolumeWindow() + "개월 월 총거래량의 평균 (같으면 제외)"
     : "현재 종가도 " + SCREEN.maPeriod + "일선 위를 유지";
   document.getElementById("sort-vol").textContent = monthly ? "이격률순" : "거래량배수순";
   document.getElementById("reading-breakout").textContent = monthly
     ? "마지막 완료 월만 판정합니다. 그 직전 " + below + "개월은 각 월 종가가 당시의 " + maLabel() + "보다 모두 낮아야 하며, 판정 월 종가는 " + maLabel() + "보다 높아야 합니다. 선과 같은 값은 통과하지 않습니다."
     : "돌파는 단순히 이동평균선 위에 있는 상태가 아니라, 전일 종가가 이동평균선 이하이고 당일 종가가 위로 올라선 교차일만 잡습니다.";
   document.getElementById("reading-volume").textContent = monthly
-    ? "거래량은 완료된 각 월의 일별 거래량 합계입니다. 거래량과 전월 대비 배수는 참고값이며 선정 조건에 사용하지 않습니다. 자료가 없으면 —로 표시합니다."
+    ? "거래량은 완료된 각 월의 일별 거래량 합계입니다. 판정 월 총거래량이 그 직전 " + monthlyVolumeWindow() + "개월 월 총거래량의 산술평균보다 커야 합니다. 판정 월은 평균에서 제외하며, 평균과 같으면 통과하지 않습니다."
     : "직전 " + SCREEN.volWindow + "거래일 평균 거래량은 돌파 당일을 제외하고 계산합니다.";
   document.getElementById("reading-return").hidden = monthly;
   document.getElementById("reading-hold").textContent = monthly
-    ? "진행 중인 월은 제외합니다. 이후 일봉의 현재가나 돌파 유지 여부를 추가 조건으로 사용하지 않습니다. 카드의 월말 가격과 이격은 판정 월 기준입니다."
+    ? "진행 중인 월은 제외합니다. 월말 가격과 이격은 판정 월 기준이며, 별도 표시된 최신종가는 날짜가 명시된 확정 일봉 종가입니다. 최신종가는 선정 조건이나 돌파 유지 조건으로 사용하지 않습니다."
     : SCREEN.requireHold
       ? "현재 종가가 이동평균선 위인 종목만 포함합니다. 돌파 이후 한 번도 이탈하지 않았다는 뜻은 아닙니다. 현재 이격은 이동평균선 대비 값이며, 경과는 돌파로부터 지난 거래일 수입니다."
       : "현재 종가가 이동평균선 아래인 종목도 포함합니다. 현재 이격은 이동평균선 대비 값이며, 경과는 돌파로부터 지난 거래일 수입니다.";
   document.getElementById("reading-chart").textContent = monthly
-    ? "차트는 완료된 월봉과 " + maLabel() + ", 월 총거래량입니다. 주황색 거래량 봉은 판정 월이며, 차트를 문지르면 해당 월의 값을 볼 수 있습니다. ‘직전 " + below + "개월 확인’에서 월별 종가와 당시 이동평균을 비교할 수 있습니다."
+    ? "차트는 판정 월까지의 완료된 월봉과 " + maLabel() + ", 월 총거래량입니다. 주황색 거래량 봉은 판정 월이며, 파란 점선·점은 별도로 표시한 최신종가입니다. 진행 중인 월봉을 추가하지 않습니다. 차트를 문지르면 월별 값을 볼 수 있고, 접힌 확인표에서 직전 " + below + "개월 가격과 직전 " + monthlyVolumeWindow() + "개월 거래량을 확인할 수 있습니다."
     : "차트의 주황색 거래량 봉이 돌파일입니다. 돌파일이 차트 구간 밖인 경우에는 강조 표시 없이 마지막 거래일 값을 보여줍니다. 차트를 손가락으로 문지르면 그날의 값이 표시됩니다.";
   document.getElementById("reading-basis").textContent = (SCREEN.priceBasis === "adj"
     ? "신호 판정은 수정주가 기준(분할·배당 반영)입니다."
@@ -727,15 +747,17 @@ function renderMarkets() {
 function header() {
   const m = MK[curMarket] || {};
   const period = document.getElementById("period-window");
+  const volumeMonths = priorMonthLabels(m.targetMonth || m.latest, monthlyVolumeWindow());
   period.hidden = !isMonthly();
   period.textContent = isMonthly() ? "판정 월 " + (m.targetMonth || dateLabel(m.latest))
-    + " · 직전 " + (SCREEN.belowMonths || 6) + "개월 " + (m.priorBelowStart || "—") + " ~ " + (m.priorBelowEnd || "—") : "";
+    + " · 직전 " + (SCREEN.belowMonths || 6) + "개월 " + (m.priorBelowStart || "—") + " ~ " + (m.priorBelowEnd || "—")
+    + " · 거래량 평균 기간 " + (volumeMonths[0] || "—") + " ~ " + (volumeMonths[volumeMonths.length - 1] || "—") : "";
   document.getElementById("asof").textContent =
     (isMonthly() ? "완료된 월봉 기준" : "기준 거래일 " + (m.latest || "—") + " · 최근 " + SCREEN.lookback + "거래일 검색")
     + " · 생성 " + SCREEN.generatedAt +
     (m.stale ? " · " + m.stale + "종목은 마지막 봉 날짜가 다름" : "") +
     (m.failed ? " · 다운로드 실패 " + m.failed + "종목은 스캔 제외" : "") +
-    (m.invalidData ? " · 판정 " + (isMonthly() ? "가격이" : "가격·거래량이") + " 유효하지 않은 " + m.invalidData + "종목 제외" : "") +
+    (m.invalidData ? " · 판정 가격·거래량이 유효하지 않은 " + m.invalidData + "종목 제외" : "") +
     (m.noHistory ? " · 이력 부족 " + m.noHistory + "종목 제외" : "") +
     (m.shortHistory ? " · 이력이 짧아 일부만 평가된 " + m.shortHistory + "종목" : "") +
     (m.gapped && !m.degraded ? " · 거래일 누락 " + m.gapped + "종목 제외" : "") +
@@ -766,8 +788,10 @@ function plot(h, id) {
   const n = h.closes.length;
   if (!n) return '<p class="empty">차트 데이터가 없습니다.</p>';
   const sig = signalIndex(h);
+  const latest = isMonthly() ? latestSignalPrice(h) : null;
   const xs = i => n > 1 ? PL + (i / (n - 1)) * IW : W / 2;
   const vals = h.highs.concat(h.lows, h.mas).filter(Number.isFinite);
+  if (latest !== null) vals.push(latest);
   let lo = vals.length ? Math.min(...vals) : 0, hi = vals.length ? Math.max(...vals) : 1;
   const pad = (hi - lo) * 0.08 || 1;
   lo -= pad; hi += pad;
@@ -797,6 +821,12 @@ function plot(h, id) {
   }).join("");
 
   const sx = sig === null ? null : xs(sig);
+  const latestY = latest === null ? null : y(latest);
+  const latestMarker = latestY === null ? "" : `<g class="latest-price-marker" aria-label="${esc(h.latestDate)} 최신종가 (${priceLabel(h)}) ${px(latest, h)}">
+    <line x1="${PL}" y1="${latestY.toFixed(1)}" x2="${W - PR}" y2="${latestY.toFixed(1)}" stroke="var(--latest)" stroke-width="1.5" stroke-dasharray="4 3" vector-effect="non-scaling-stroke"></line>
+    <circle cx="${W - PR}" cy="${latestY.toFixed(1)}" r="3" fill="var(--latest)" stroke="var(--surface)" stroke-width="1.5"></circle>
+    <text class="latest-price-label" x="${W - PR - 7}" y="${Math.max(PT + 11, latestY - 6).toFixed(1)}" text-anchor="end">최신종가 ${px(latest, h)}</text>
+  </g>`;
 
   return `
 <svg class="plot" viewBox="0 0 ${W} ${VB + 2}" role="img"
@@ -807,6 +837,7 @@ function plot(h, id) {
   ${bars}
   ${candles}
   <polyline points="${line(h.mas)}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-dasharray="5 4" stroke-linecap="round" vector-effect="non-scaling-stroke"></polyline>
+  ${latestMarker}
   <line class="cross" x1="0" y1="${PT}" x2="0" y2="${VB}" stroke="var(--ink-3)" stroke-width="1" vector-effect="non-scaling-stroke" opacity="0"></line>
   <rect class="hit" x="0" y="0" width="${W}" height="${VB + 2}" fill="transparent"></rect>
 </svg>`;
@@ -825,11 +856,33 @@ function auditHTML(h) {
   </details>`;
 }
 
+function volumeAuditHTML(h) {
+  const months = Array.isArray(h.priorVolumeMonths) ? h.priorVolumeMonths : [];
+  const labels = months.length ? months.map(m => dateLabel(m.month)) : priorMonthLabels(h.date, monthlyVolumeWindow());
+  return `<details class="monthly-audit volume-audit">
+    <summary>직전 ${esc(monthlyVolumeWindow())}개월 거래량 · ${esc(labels[0] || "—")} ~ ${esc(labels[labels.length - 1] || "—")}</summary>
+    <div class="tablewrap"><table><thead><tr><th>월</th><th>총거래량</th></tr></thead>
+      <tbody>${months.map(m => `<tr><td>${esc(dateLabel(m.month))}</td><td>${nf(m.volume, 0)}</td></tr>`).join("")}
+      <tr><td>${esc(monthlyVolumeWindow())}개월 평균</td><td>${nf(h.avgVol)}</td></tr>
+      <tr><td>판정 월 ${esc(dateLabel(h.date))}</td><td>${nf(h.volume, 0)}</td></tr></tbody></table></div>
+    <p class="monthly-note">판정 월 총거래량 &gt; 위 평균. 평균과 같으면 제외합니다.</p>
+  </details>`;
+}
+
+function latestCloseHTML(h) {
+  const chosen = latestSignalPrice(h);
+  const date = typeof h.latestDate === "string" ? h.latestDate : "—";
+  if (chosen === null) return `최신종가 <strong>—</strong><span class="table-date">선택 기준 종가 자료 없음 · ${esc(date)}</span>`
+    + (Number.isFinite(h.latestClose) ? `<small class="raw-price">실제 ${px(h.latestClose, h)}</small>` : "");
+  return `최신종가 <strong>${px(chosen, h)}</strong><span class="table-date">${priceLabel(h)} · ${esc(date)} 확정 일봉</span>`
+    + rawPriceHTML(chosen, h.latestClose, h);
+}
+
 function monthlyCard(h, id) {
   return `<article class="card" tabindex="0" data-id="${id}">
     <div class="card-top"><span class="tkr">${esc(h.ticker)}</span><span class="co">${esc(h.name)}</span><span class="sig-date">${esc(dateLabel(h.date))}</span></div>
     <div class="metaline"><span class="sector">${esc(h.sector || (MK[h.market] || {}).label)}</span><span class="per">${perHTML(h)}</span></div>
-    <p class="monthly-note">거래량 참고 · 판정 월 ${vol(h.volume)} · 전월 ${vol(h.avgVol)} · 전월 대비 ${Number.isFinite(h.volRatio) ? nf(h.volRatio) + "x" : "—"}</p>
+    <p class="monthly-note">판정 월 거래량 ${nf(h.volume, 0)} &gt; 직전 ${esc(monthlyVolumeWindow())}개월 평균 ${nf(h.avgVol)} · 평균 대비 ${Number.isFinite(h.volRatio) ? nf(h.volRatio) + "x" : "—"}</p>
     <div class="grid">
       <div class="cell hd"></div><div class="cell hd">월말 ${priceLabel(h)}</div><div class="cell hd">${esc(maLabel())}</div><div class="cell hd">이격</div>
       <div class="cell rl">판정 월<span>${esc(dateLabel(h.date))}</span></div>
@@ -839,6 +892,8 @@ function monthlyCard(h, id) {
     </div>
     ${h.lastTradingDate ? `<p class="monthly-note">판정 월 마지막 거래일 ${esc(h.lastTradingDate)}</p>` : ""}
     ${auditHTML(h)}
+    ${volumeAuditHTML(h)}
+    <div class="latest-close">${latestCloseHTML(h)}</div>
     <div class="chart-head"><div class="legend">
       <span><i class="swatch up"></i>상승 월봉</span><span><i class="swatch down"></i>하락 월봉</span><span><i class="swatch ma"></i>${esc(maLabel())}</span>
       <span>${priceBasis(h) === "adj" ? "수정주가" : "실제 종가"} 기준</span>
@@ -922,12 +977,14 @@ function readoutHTML(h, i, isSignal) {
 /* ---------- table ---------- */
 function table(hits) {
   if (isMonthly()) return `<div class="tablewrap"><table>
-    <thead><tr><th>판정 월</th><th>티커</th><th>월말 가격 / 마지막 거래일</th><th>${esc(maLabel())}</th><th>이격</th><th>월 총거래량(참고)</th><th>전월 총거래량(참고)</th><th>전월 대비(참고)</th><th>직전 ${esc(SCREEN.belowMonths || 6)}개월</th><th>PER</th><th>선행 PER</th></tr></thead>
+    <thead><tr><th>판정 월</th><th>티커</th><th>월말 가격 / 마지막 거래일</th><th>최신종가 / 날짜</th><th>${esc(maLabel())}</th><th>이격</th><th>월 총거래량</th><th>직전 ${esc(monthlyVolumeWindow())}개월 평균</th><th>평균 대비</th><th>거래량 확인</th><th>직전 ${esc(SCREEN.belowMonths || 6)}개월</th><th>PER</th><th>선행 PER</th></tr></thead>
     <tbody>${hits.map(h => `<tr>
       <td>${esc(dateLabel(h.date))}</td><td class="sym">${esc(h.ticker)}</td>
       <td>${px(signalClose(h), h)}<small class="table-date">${priceLabel(h)}${h.lastTradingDate ? " · " + esc(h.lastTradingDate) : ""}</small>${rawPriceHTML(signalClose(h), h.close, h)}</td>
+      <td>${latestCloseHTML(h)}</td>
       <td>${px(h.ma, h)}</td><td class="up">+${nf(h.abovePct)}%</td>
-      <td>${vol(h.volume)}</td><td>${vol(h.avgVol)}</td><td>${Number.isFinite(h.volRatio) ? nf(h.volRatio) + "x" : "—"}</td>
+      <td>${nf(h.volume, 0)}</td><td>${nf(h.avgVol)}</td><td>${Number.isFinite(h.volRatio) ? nf(h.volRatio) + "x" : "—"}</td>
+      <td>${volumeAuditHTML(h)}</td>
       <td>${auditHTML(h)}</td>
       <td>${h.per != null ? nf(h.per, 1) : (h.eps != null && h.eps < 0 ? "적자" : "—")}</td>
       <td>${h.forwardPer != null ? nf(h.forwardPer, 1) : "—"}</td>
@@ -976,7 +1033,7 @@ function render() {
   if (!hits.length) {
     const m = MK[curMarket] || {};
     const empty = `<div class="empty">${esc(m.label)}${isMonthly()
-      ? "의 " + esc(m.targetMonth || dateLabel(m.latest)) + " 판정 월에는 직전 " + esc(SCREEN.belowMonths || 6) + "개월 하회와 " + esc(maLabel()) + " 상향 돌파 조건을 모두 만족한 종목이 없습니다. 진행 중인 월은 포함하지 않습니다."
+      ? "의 " + esc(m.targetMonth || dateLabel(m.latest)) + " 판정 월에는 직전 " + esc(SCREEN.belowMonths || 6) + "개월 하회·" + esc(maLabel()) + " 상향 돌파·직전 " + esc(monthlyVolumeWindow()) + "개월 평균 초과 거래량 조건을 모두 만족한 종목이 없습니다. 진행 중인 월은 포함하지 않습니다."
       : "에서는 최근 " + esc(SCREEN.lookback) + "거래일 동안 조건을 만족한 종목이 없습니다."}</div>`;
     cardsEl.innerHTML = empty;
     tableEl.innerHTML = empty;
