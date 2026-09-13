@@ -10,7 +10,7 @@ S&P 500 120일 이동평균선 돌파 + 거래량 급증 스크리너
   python sp500_breakout.py --lookback 5       # 최근 5거래일 내 발생한 신호 모두
   python sp500_breakout.py --date 2026-08-20  # 특정 일자 기준
   python sp500_breakout.py --ma 60 --vol-mult 1.5 --vol-window 5
-  python sp500_breakout.py --tickers AAPL,MSFT,NVDA
+  python sp500_breakout.py --market sp500 --tickers AAPL,MSFT,NVDA
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ import argparse
 import hashlib
 from collections import Counter
 import json
+import math
 import os
 import pickle
 import ssl
@@ -249,6 +250,11 @@ def download_prices(tickers, start, end, chunk=60, use_cache=True):
             try:
                 with cache_path.open("rb") as fh:
                     cached = pickle.load(fh)
+                if not isinstance(cached, dict):
+                    raise ValueError("invalid price cache")
+                cached = {t: df for t, df in cached.items()
+                          if t in tickers and isinstance(df, pd.DataFrame) and not df.empty}
+                download_prices.last_failed = sorted(set(tickers) - set(cached))
                 print(f"  캐시 사용 ({cache_path.name})")
                 return cached
             except Exception:
@@ -372,28 +378,48 @@ def _num(v):
     return None if pd.isna(f) or f in (float("inf"), float("-inf")) else round(f, 2)
 
 
+def _text(v):
+    """CSV의 빈 문자열은 재로딩 시 NaN일 수 있다."""
+    return "" if v is None or pd.isna(v) else str(v)
+
+
 # --------------------------------------------------------------------------
 # 3. 신호 계산
 # --------------------------------------------------------------------------
+def signal_price(df, price_basis):
+    """선택한 판정 기준을 보존한다. 잘못된 가격은 봉을 삭제하지 않고 결측으로 둔다."""
+    if price_basis not in ("adj", "raw"):
+        raise ValueError(f"지원하지 않는 가격 기준: {price_basis}")
+    column = "Adj Close" if price_basis == "adj" else "Close"
+    if column not in df:
+        raise ValueError(f"{column} 열이 없어 {price_basis} 기준으로 판정할 수 없습니다")
+    values = pd.to_numeric(df[column], errors="coerce").astype(float)
+    return values.where(values.map(math.isfinite) & (values > 0))
+
+
 def find_signals(df, ma_period, vol_window, vol_mult, price_basis, require_hold=True):
     """한 종목의 시계열에서 조건을 만족하는 모든 날짜를 반환."""
-    price = df["Adj Close"] if price_basis == "adj" and "Adj Close" in df else df["Close"]
-    price = price.astype(float)
-    volume = df["Volume"].astype(float)
+    price = signal_price(df, price_basis)
+    raw_close = signal_price(df, "raw")
+    volume = pd.to_numeric(df["Volume"], errors="coerce").astype(float)
+    volume = volume.where(volume.map(math.isfinite) & (volume >= 0))
 
     ma = price.rolling(ma_period, min_periods=ma_period).mean()
     # 돌파 당일을 제외한 직전 vol_window 거래일의 평균 거래량
     avg_vol = volume.shift(1).rolling(vol_window, min_periods=vol_window).mean()
 
     crossed_up = (price > ma) & (price.shift(1) <= ma.shift(1)) & ma.notna() & ma.shift(1).notna()
-    vol_ratio = volume / avg_vol
-    hit = (crossed_up & (vol_ratio >= vol_mult)).fillna(False)
+    vol_ratio = volume / avg_vol.where(avg_vol > 0)
+    hit = (crossed_up & (vol_ratio >= vol_mult) & vol_ratio.map(math.isfinite)
+           & raw_close.notna()).fillna(False)
 
     if not hit.any():
         return pd.DataFrame()
 
     # 돌파 이후 현재가가 이동평균선 위를 지키고 있는지
     last_price, last_ma = price.iloc[-1], ma.iloc[-1]
+    if pd.isna(last_price) or pd.isna(raw_close.iloc[-1]) or pd.isna(last_ma):
+        return pd.DataFrame()
     holding = bool(pd.notna(last_ma) and last_price > last_ma)
     if require_hold and not holding:
         return pd.DataFrame()
@@ -405,12 +431,14 @@ def find_signals(df, ma_period, vol_window, vol_mult, price_basis, require_hold=
         {
             "date": df.index[hit],
             "close": df["Close"].astype(float)[hit].values,
+            "signal_close": price[hit].values,
             "ma": ma[hit].values,
             "above_ma_pct": (price[hit].values / ma[hit].values - 1) * 100,
             "volume": volume[hit].values,
             "avg_vol": avg_vol[hit].values,
             "vol_ratio": vol_ratio[hit].values,
             "last_close": float(df["Close"].astype(float).iloc[-1]),
+            "last_signal_close": float(last_price),
             "last_ma": float(last_ma) if pd.notna(last_ma) else float("nan"),
             "last_pct": (float(last_price) / float(last_ma) - 1) * 100 if pd.notna(last_ma) else float("nan"),
             "bars_since": [last_i - p for p in positions],
@@ -422,37 +450,44 @@ def find_signals(df, ma_period, vol_window, vol_mult, price_basis, require_hold=
 # --------------------------------------------------------------------------
 # 4. HTML 리포트 (휴대폰 브라우저용)
 # --------------------------------------------------------------------------
-CHART_WINDOW = 70  # 카드 차트에 담을 거래일 수 (일봉 몸통이 뭉개지지 않는 상한)
+CHART_WINDOW = 70  # 기본 차트 길이. 오래된 돌파일은 포함하도록 확장한다.
 
 
 def build_series(df, sig_row, args, ticker, name, sector, market="sp500"):
     """카드 차트에 넣을 시계열 조각을 만든다."""
-    price = df["Adj Close"] if args.price_basis == "adj" and "Adj Close" in df else df["Close"]
+    price = signal_price(df, args.price_basis)
     ma = price.astype(float).rolling(args.ma, min_periods=args.ma).mean()
+    # 캔들과 MA를 같은 판정 기준으로 그린다. 표시용 실제 종가는 별도 보존한다.
+    factor = price / signal_price(df, "raw")
 
     end_pos = len(df.index)
-    start_pos = max(0, end_pos - CHART_WINDOW)
-    window = df.index[start_pos:end_pos]
     sig_date = pd.Timestamp(sig_row["date"])
-    sig_pos = int(df.index.get_loc(sig_date)) - start_pos
+    absolute_sig_pos = int(df.index.get_loc(sig_date))
+    start_pos = min(max(0, end_pos - CHART_WINDOW), absolute_sig_pos)
+    window = df.index[start_pos:end_pos]
+    sig_pos = absolute_sig_pos - start_pos
 
     def clean(series):
         vals = series.iloc[start_pos:end_pos]
-        return [None if pd.isna(v) else round(float(v), 4) for v in vals]
+        return [None if pd.isna(v) or not math.isfinite(float(v)) else round(float(v), 4)
+                for v in vals]
 
     return {
         "market": market,
-        "ticker": ticker,
-        "name": name,
-        "sector": sector,
+        "ticker": _text(ticker),
+        "name": _text(name),
+        "sector": _text(sector),
         "date": str(pd.Timestamp(sig_row["date"]).date()),
         "close": round(float(sig_row["close"]), 2),
+        "signalClose": round(float(sig_row["signal_close"]), 4),
+        "priceBasis": args.price_basis,
         "ma": round(float(sig_row["ma"]), 2),
         "abovePct": round(float(sig_row["above_ma_pct"]), 2),
         "volume": int(sig_row["volume"]),
         "avgVol": int(sig_row["avg_vol"]),
         "volRatio": round(float(sig_row["vol_ratio"]), 2),
         "lastClose": round(float(sig_row["last_close"]), 2),
+        "lastSignalClose": round(float(sig_row["last_signal_close"]), 4),
         "lastMa": round(float(sig_row["last_ma"]), 2),
         "lastPct": round(float(sig_row["last_pct"]), 2),
         # 돌파일 종가 대비 현재 종가 등락률 (표시되는 실제 종가끼리의 비교)
@@ -460,12 +495,13 @@ def build_series(df, sig_row, args, ticker, name, sector, market="sp500"):
         "barsSince": int(sig_row["bars_since"]),
         "sigIndex": sig_pos,
         "dates": [d.strftime("%Y-%m-%d") for d in window],
-        "opens": clean(df["Open"].astype(float)),
-        "highs": clean(df["High"].astype(float)),
-        "lows": clean(df["Low"].astype(float)),
-        "closes": clean(df["Close"].astype(float)),
+        "opens": clean(pd.to_numeric(df["Open"], errors="coerce") * factor),
+        "highs": clean(pd.to_numeric(df["High"], errors="coerce") * factor),
+        "lows": clean(pd.to_numeric(df["Low"], errors="coerce") * factor),
+        "closes": clean(price),
         "mas": clean(ma),
-        "volumes": [int(v) for v in df["Volume"].astype(float).iloc[start_pos:end_pos]],
+        "volumes": [int(v) if pd.notna(v) and math.isfinite(float(v)) and v >= 0 else None
+                    for v in pd.to_numeric(df["Volume"], errors="coerce").iloc[start_pos:end_pos]],
     }
 
 
@@ -479,7 +515,9 @@ def write_summary(rows, markets, args, out_path: Path, top=8):
     나머지는 개수로만 알린다. 자세한 건 링크에서 본다.
     """
     when = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M")
-    lines = [f"[120일선 돌파 스크린] {when} KST", ""]
+    lines = [f"[{args.ma}일선 돌파 스크린] {when} KST", ""]
+    if getattr(args, "date", None):
+        lines.extend([f"과거 가격 기준 {args.date} · 구성종목과 재무지표는 현재 조회 자료", ""])
 
     for m in markets:
         hits = [r for r in rows if r["market"] == m["id"]]
@@ -522,6 +560,8 @@ def write_html(charts, args, markets, out_path: Path):
 
     payload = {
         "generatedAt": datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M") + " KST",
+        "historicalAsOf": getattr(args, "date", None),
+        "fundamentalsAsOf": getattr(args, "fundamentals_as_of", None),
         "markets": markets,
         "maPeriod": args.ma,
         "volWindow": args.vol_window,
@@ -531,9 +571,10 @@ def write_html(charts, args, markets, out_path: Path):
         "requireHold": not args.no_hold,
         "hits": charts,
     }
-    fragment = template_path.read_text(encoding="utf-8").replace(
-        "/*__DATA__*/null", json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    )
+    # 외부 종목명에 </script>가 있어도 인라인 데이터 영역을 벗어나지 않게 한다.
+    encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False,
+                         separators=(",", ":")).replace("<", "\\u003c")
+    fragment = template_path.read_text(encoding="utf-8").replace("/*__DATA__*/null", encoded)
 
     artifact_path = out_path.with_suffix(".artifact.html")
     artifact_path.write_text(fragment, encoding="utf-8")
@@ -559,6 +600,15 @@ def write_html(charts, args, markets, out_path: Path):
 # --------------------------------------------------------------------------
 # 5. 메인
 # --------------------------------------------------------------------------
+def result_columns(args):
+    """신호가 없어도 동일한 CSV 스키마를 기록한다."""
+    return ["market", "date", "ticker", "name", "sector", "close", "signal_close",
+            f"ma{args.ma}", "above_ma_%", "volume", f"avg_vol_{args.vol_window}d",
+            "vol_ratio", "last_close", "last_signal_close", "last_above_ma_%",
+            "return_since_%", "bars_since", "price_basis", "per", "forward_per", "eps",
+            "fundamentals_as_of"]
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         description="S&P 500 120일선 상향돌파 + 거래량 급증 스크리너",
@@ -584,8 +634,22 @@ def main() -> int:
     p.add_argument("--no-hold", action="store_true",
                    help="돌파 후 현재가가 이동평균선 아래로 다시 내려간 종목도 포함")
     args = p.parse_args()
-
-    end_date = datetime.strptime(args.date, "%Y-%m-%d").date() if args.date else date.today()
+    for name in ("ma", "vol_window", "lookback"):
+        if getattr(args, name) <= 0:
+            p.error(f"--{name.replace('_', '-')}는 양의 정수여야 합니다")
+    if not math.isfinite(args.vol_mult) or args.vol_mult <= 0:
+        p.error("--vol-mult는 유한한 양수여야 합니다")
+    if args.tickers is not None:
+        if args.market == "all":
+            p.error("--tickers에는 --market sp500 또는 --market kospi200을 지정하세요")
+        tickers = list(dict.fromkeys(t.strip().upper() for t in args.tickers.split(",") if t.strip()))
+        if not tickers:
+            p.error("--tickers에 하나 이상의 티커를 입력하세요")
+    try:
+        end_date = (datetime.strptime(args.date, "%Y-%m-%d").date() if args.date
+                    else datetime.now(ZoneInfo("Asia/Seoul")).date())
+    except ValueError:
+        p.error("--date는 YYYY-MM-DD 형식의 유효한 날짜여야 합니다")
     # MA 기간 + 여유분 확보 (거래일 -> 달력일 환산 약 1.55배 + 버퍼)
     # HTML 리포트는 차트 구간 내내 MA 선이 그려져야 하므로 그만큼 더 받는다.
     span = args.ma + args.vol_window + args.lookback + (CHART_WINDOW if args.html else 0)
@@ -597,40 +661,65 @@ def main() -> int:
 
     selected = list(MARKETS) if args.market == "all" else [args.market]
     rows, charts, market_summaries = [], [], []
+    scan_errors = []
 
     for mk in selected:
         spec = MARKETS[mk]
-        if args.tickers:
-            meta = pd.DataFrame({"ticker": [t.strip().upper() for t in args.tickers.split(",")]})
+        if args.tickers is not None:
+            meta = pd.DataFrame({"ticker": tickers})
             meta["name"] = ""
             meta["sector"] = ""
         else:
             meta = spec["loader"](refresh=args.refresh_list)
         meta["ticker"] = meta["ticker"].astype(str)
+        for column in ("name", "sector"):
+            meta[column] = meta[column].fillna("").astype(str)
         meta["yahoo"] = meta["ticker"].map(spec["to_yahoo"])
 
         print(f"\n[{spec['label']}] 대상 {len(meta)}종목")
         prices = download_prices(meta["yahoo"].tolist(), start_date, end_date,
                                  use_cache=not args.no_cache)
-        n_failed = len(getattr(download_prices, "last_failed", []) or [])
+        n_failed = len(set(meta["yahoo"]) - set(prices))
         prices = {t: drop_partial_bar(df, mk) for t, df in prices.items()}
         # 과거 데이터가 짧으면 이동평균이 계산되지 않아 신호가 조용히 사라진다.
         # MA 는 앞선 ma 봉이 있어야 나오므로, 검색 구간 전체를 평가하려면
         # ma + lookback 봉이 필요하다. 그에 못 미치는 종목을 따로 센다.
-        need_full = args.ma + args.lookback
-        n_no_hist = sum(1 for df in prices.values() if len(df) <= args.ma)
-        prices = {t: df for t, df in prices.items() if len(df) > args.ma}
+        min_history = max(args.ma, args.vol_window)
+        need_full = min_history + args.lookback
+        n_no_hist = sum(1 for df in prices.values() if len(df) <= min_history)
+        prices = {t: df for t, df in prices.items() if len(df) > min_history}
+        invalid = []
+        for t, df in prices.items():
+            try:
+                basis = signal_price(df, args.price_basis)
+                raw_close = signal_price(df, "raw")
+                if pd.isna(basis.iloc[-1]) or pd.isna(raw_close.iloc[-1]):
+                    raise ValueError("마지막 봉 가격이 유효하지 않습니다")
+                ma = basis.rolling(args.ma, min_periods=args.ma).mean()
+                volumes = pd.to_numeric(df["Volume"], errors="coerce").astype(float)
+                volumes = volumes.where(volumes.map(math.isfinite) & (volumes >= 0))
+                avg_vol = volumes.shift(1).rolling(args.vol_window,
+                                                   min_periods=args.vol_window).mean()
+                evaluable = (basis.notna() & basis.shift(1).notna() & raw_close.notna()
+                             & ma.notna() & ma.shift(1).notna() & volumes.notna()
+                             & (avg_vol > 0))
+                if pd.isna(ma.iloc[-1]) or not evaluable.iloc[-args.lookback:].any():
+                    raise ValueError("검색 구간의 가격·거래량으로 조건을 평가할 수 없습니다")
+            except (KeyError, ValueError) as exc:
+                invalid.append(t)
+                print(f"[{spec['label']}] {t} 판정 불가 — 제외: {exc}", file=sys.stderr)
+        prices = {t: df for t, df in prices.items() if t not in set(invalid)}
         short = {t: len(df) for t, df in prices.items() if len(df) < need_full}
         print(f"[{spec['label']}] 시세 확보 {len(prices)}종목"
               + (f" (다운로드 실패 {n_failed}종목 — 스캔 제외)" if n_failed else ""))
         if n_no_hist:
-            print(f"[{spec['label']}] 이력이 MA{args.ma} 에 못 미쳐 제외 {n_no_hist}종목")
+            print(f"[{spec['label']}] 계산에 필요한 이력이 부족해 제외 {n_no_hist}종목")
         if short:
             sample = ", ".join(f"{t}({n}봉)" for t, n in list(short.items())[:8])
             print(f"[{spec['label']}] 이력이 짧아 검색 구간 일부만 평가됨 {len(short)}종목: {sample}"
                   + (" ..." if len(short) > 8 else ""))
         if not prices:
-            print(f"[warn] {spec['label']} 시세를 받지 못해 건너뜁니다.", file=sys.stderr)
+            scan_errors.append(spec["label"])
             continue
 
         # 기준 거래일은 최댓값이 아니라 최빈값으로 잡는다. 한두 종목이 남들보다
@@ -703,15 +792,18 @@ def main() -> int:
                         "name": m.get("name", ""),
                         "sector": m.get("sector", ""),
                         "close": round(r["close"], dec),
+                        "signal_close": round(r["signal_close"], 4),
                         f"ma{args.ma}": round(r["ma"], dec),
                         "above_ma_%": round(r["above_ma_pct"], 2),
                         "volume": int(r["volume"]),
                         f"avg_vol_{args.vol_window}d": int(r["avg_vol"]),
                         "vol_ratio": round(r["vol_ratio"], 2),
                         "last_close": round(r["last_close"], dec),
+                        "last_signal_close": round(r["last_signal_close"], 4),
                         "last_above_ma_%": round(r["last_pct"], 2),
                         "return_since_%": round((r["last_close"] / r["close"] - 1) * 100, 2),
                         "bars_since": int(r["bars_since"]),
+                        "price_basis": args.price_basis,
                         "_y": yt,
                     }
                 )
@@ -729,6 +821,7 @@ def main() -> int:
             "latest": str(latest.date()),
             "scanned": len(prices),
             "failed": n_failed,
+            "invalidData": len(invalid),
             "noHistory": n_no_hist,
             "shortHistory": len(short),
             "gapped": len(gapped),
@@ -737,34 +830,43 @@ def main() -> int:
             "hits": len(rows) - n_before,
         })
 
+    if scan_errors:
+        print("[error] 평가 가능한 시세가 없는 시장: " + ", ".join(scan_errors)
+              + ". 정상적인 0건 결과와 구분하기 위해 출력을 갱신하지 않습니다.", file=sys.stderr)
+        return 1
+
     for s in market_summaries:
         print(f"\n[{s['label']}] 조건 충족 {s['hits']}건 (기준 {s['latest']}, {s['scanned']}종목 스캔)")
 
     if not rows:
         print("\n조건을 만족하는 종목이 없습니다.")
+        pd.DataFrame(columns=result_columns(args)).to_csv(
+            Path(args.out), index=False, encoding="utf-8-sig")
         if args.html:
             write_html([], args, market_summaries, Path(args.html))
         if args.summary:
             write_summary([], market_summaries, args, Path(args.summary))
         return 0
 
+    args.fundamentals_as_of = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M") + " KST"
     funda = fetch_fundamentals(sorted({r["_y"] for r in rows}))
     for r in rows:
         f = funda.get(r.pop("_y"), {})
+        r["fundamentals_as_of"] = args.fundamentals_as_of
         r["per"] = _num(f.get("per"))
         r["forward_per"] = _num(f.get("forward_per"))
         r["eps"] = _num(f.get("eps"))
         if not str(r.get("sector") or "").strip():
-            r["sector"] = f.get("sector", "")
+            r["sector"] = _text(f.get("sector"))
     for c in charts:
         f = funda.get(c.pop("_y"), {})
         c["per"] = _num(f.get("per"))
         c["forwardPer"] = _num(f.get("forward_per"))
         c["eps"] = _num(f.get("eps"))
         if not str(c.get("sector") or "").strip():
-            c["sector"] = f.get("sector", "")
+            c["sector"] = _text(f.get("sector"))
 
-    res = pd.DataFrame(rows).sort_values(["market", "date", "vol_ratio"],
+    res = pd.DataFrame(rows, columns=result_columns(args)).sort_values(["market", "date", "vol_ratio"],
                                          ascending=[True, False, False])
     with pd.option_context("display.max_rows", None, "display.width", 240,
                            "display.max_colwidth", 22):

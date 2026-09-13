@@ -40,6 +40,9 @@ jobs:
       - name: 의존성 설치
         run: pip install -r requirements.txt
 
+      - name: 오프라인 단위 테스트
+        run: python -m unittest discover -s tests -v
+
       - name: 스크리너 실행
         run: |
           python sp500_breakout.py --lookback 20 \
@@ -48,6 +51,7 @@ jobs:
       - name: 결과 확인
         run: |
           test -s report.html || { echo "report.html 이 비어 있음"; exit 1; }
+          test -s breakouts_20d.csv || { echo "breakouts_20d.csv 가 없거나 비어 있음"; exit 1; }
           test -s summary.txt || { echo "summary.txt 이 비어 있음"; exit 1; }
           echo "생성 크기: $(wc -c < report.html) bytes"
           cat summary.txt
