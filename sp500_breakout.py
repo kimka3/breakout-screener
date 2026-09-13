@@ -265,7 +265,8 @@ def download_prices(tickers, start, end, chunk=60, use_cache=True):
     cache_path = None
     if use_cache:
         key = hashlib.md5(
-            f"{start}|{end}|{','.join(sorted(tickers))}".encode()
+            # Old caches removed priced sessions whose volume was missing.
+            f"priced-sessions-v2|{start}|{end}|{','.join(sorted(tickers))}".encode()
         ).hexdigest()[:12]
         cache_path = CACHE_DIR / f"prices_{key}.pkl"
         if cache_path.exists() and (time.time() - cache_path.stat().st_mtime) < 6 * 3600:
@@ -314,7 +315,9 @@ def download_prices(tickers, start, end, chunk=60, use_cache=True):
                 except KeyError:
                     failed.append(t)
                     continue
-                df = df.dropna(subset=["Close", "Volume"])
+                # Retain priced sessions for the monthly screen when volume is
+                # missing. Daily volume rules validate that field separately.
+                df = df.dropna(subset=["Close"])
                 if df.empty:
                     failed.append(t)
                 else:
@@ -346,7 +349,7 @@ def download_prices(tickers, start, end, chunk=60, use_cache=True):
                         df = df[t]
                     except KeyError:
                         df = df.droplevel(-1, axis=1)
-                df = df.dropna(subset=["Close", "Volume"])
+                df = df.dropna(subset=["Close"])
                 if not df.empty:
                     out[t] = df
                     recovered.add(t)
@@ -566,14 +569,14 @@ def write_summary(rows, markets, args, out_path: Path, top=8):
 
     monthly = getattr(args, "monthly_payload", None)
     if monthly is not None:
-        lines.extend(["10개월선 장기 돌파 · 직전 6개월 이평선 아래 · 전월 대비 거래량 2배", ""])
+        lines.extend(["10개월선 장기 돌파 · 직전 6개월 이평선 아래", ""])
         for m in monthly["markets"]:
             hits = [h for h in monthly["hits"] if h["market"] == m["id"]]
             lines.append(f"{m['label']} · 기준월 {m['targetMonth']} · {len(hits)}건")
             if not hits:
                 lines.append("  해당 없음")
-            for h in sorted(hits, key=lambda h: -h["volRatio"])[:top]:
-                lines.append(f"  {h['ticker']} {h['name'][:14]}  {h['volRatio']:.2f}x")
+            for h in sorted(hits, key=lambda h: (-h["abovePct"], h["ticker"]))[:top]:
+                lines.append(f"  {h['ticker']} {h['name'][:14]}  이격 {h['abovePct']:+.2f}%")
             if len(hits) > top:
                 lines.append(f"  … 외 {len(hits) - top}건")
             lines.append("")
@@ -943,16 +946,17 @@ def main() -> int:
 
         monthly_res = pd.DataFrame(monthly_rows, columns=monthly_result_columns())
         if not monthly_res.empty:
-            monthly_res = monthly_res.sort_values(["market", "date", "vol_ratio"],
-                                                 ascending=[True, False, False])
+            monthly_res = monthly_res.sort_values(["market", "date", "above_ma_%", "ticker"],
+                                                 ascending=[True, False, False, True])
         monthly_res.to_csv(Path(args.monthly_out), index=False, encoding="utf-8-sig")
-        monthly_charts.sort(key=lambda c: (c["date"], c["volRatio"]), reverse=True)
+        monthly_charts.sort(key=lambda c: (-pd.Timestamp(c["date"]).value, -c["abovePct"], c["ticker"]))
         args.monthly_payload = {
             "id": "monthly", "label": "10개월선 장기 돌파", "timeframe": "month",
             "generatedAt": datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M") + " KST",
             "historicalAsOf": args.date, "fundamentalsAsOf": args.fundamentals_as_of,
             "markets": monthly_markets, "hits": monthly_charts,
-            "maPeriod": 10, "belowMonths": 6, "volWindow": 1, "volMult": 2,
+            "maPeriod": 10, "belowMonths": 6, "volWindow": 1, "volMult": None,
+            "volumeFilter": False,
             "lookback": 1, "priceBasis": args.price_basis, "requireHold": False,
         }
         print(f"장기 CSV: {Path(args.monthly_out).resolve()} ({len(monthly_res)}건)")

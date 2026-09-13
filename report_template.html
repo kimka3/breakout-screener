@@ -670,15 +670,16 @@ function configureScreen() {
   document.getElementById("f-line2").textContent = monthly
     ? "직전 " + below + "개월 각각의 종가 < 해당 월의 " + maLabel() + " (같으면 제외)"
     : "돌파일 거래량 ≥ 직전 " + SCREEN.volWindow + "거래일 평균 × " + SCREEN.volMult;
-  document.getElementById("f-hold").hidden = !monthly && !SCREEN.requireHold;
+  document.getElementById("f-hold").hidden = monthly || !SCREEN.requireHold;
   document.getElementById("f-line3").textContent = monthly
-    ? "판정 월 총거래량 ≥ 바로 전월 총거래량 × " + SCREEN.volMult
+    ? ""
     : "현재 종가도 " + SCREEN.maPeriod + "일선 위를 유지";
+  document.getElementById("sort-vol").textContent = monthly ? "이격률순" : "거래량배수순";
   document.getElementById("reading-breakout").textContent = monthly
     ? "마지막 완료 월만 판정합니다. 그 직전 " + below + "개월은 각 월 종가가 당시의 " + maLabel() + "보다 모두 낮아야 하며, 판정 월 종가는 " + maLabel() + "보다 높아야 합니다. 선과 같은 값은 통과하지 않습니다."
     : "돌파는 단순히 이동평균선 위에 있는 상태가 아니라, 전일 종가가 이동평균선 이하이고 당일 종가가 위로 올라선 교차일만 잡습니다.";
   document.getElementById("reading-volume").textContent = monthly
-    ? "거래량은 완료된 각 월의 일별 거래량 합계입니다. 판정 월과 바로 전월의 총거래량을 비교하며, 직전 " + below + "개월 평균과 비교하지 않습니다."
+    ? "거래량은 완료된 각 월의 일별 거래량 합계입니다. 거래량과 전월 대비 배수는 참고값이며 선정 조건에 사용하지 않습니다. 자료가 없으면 —로 표시합니다."
     : "직전 " + SCREEN.volWindow + "거래일 평균 거래량은 돌파 당일을 제외하고 계산합니다.";
   document.getElementById("reading-return").hidden = monthly;
   document.getElementById("reading-hold").textContent = monthly
@@ -734,7 +735,7 @@ function header() {
     + " · 생성 " + SCREEN.generatedAt +
     (m.stale ? " · " + m.stale + "종목은 마지막 봉 날짜가 다름" : "") +
     (m.failed ? " · 다운로드 실패 " + m.failed + "종목은 스캔 제외" : "") +
-    (m.invalidData ? " · 판정 가격·거래량이 유효하지 않은 " + m.invalidData + "종목 제외" : "") +
+    (m.invalidData ? " · 판정 " + (isMonthly() ? "가격이" : "가격·거래량이") + " 유효하지 않은 " + m.invalidData + "종목 제외" : "") +
     (m.noHistory ? " · 이력 부족 " + m.noHistory + "종목 제외" : "") +
     (m.shortHistory ? " · 이력이 짧아 일부만 평가된 " + m.shortHistory + "종목" : "") +
     (m.gapped && !m.degraded ? " · 거래일 누락 " + m.gapped + "종목 제외" : "") +
@@ -749,10 +750,11 @@ function header() {
   }
 
   const hits = SCREEN.hits.filter(h => h.market === curMarket);
+  const metrics = hits.map(h => isMonthly() ? h.abovePct : h.volRatio).filter(Number.isFinite);
   document.getElementById("stats").innerHTML = [
     ["스캔 종목", m.scanned ?? "—", "개"],
     ["조건 충족", hits.length, "건"],
-    [isMonthly() ? "최고 전월 대비" : "최고 배수", hits.length ? Math.max(...hits.map(h => h.volRatio)).toFixed(2) : "—", "x"],
+    [isMonthly() ? "최고 이격" : "최고 배수", metrics.length ? Math.max(...metrics).toFixed(2) : "—", isMonthly() ? "%" : "x"],
   ].map(([k, v, u]) => `<div class="tile"><div class="k">${esc(k)}</div><div class="v">${esc(v)}<small>${esc(u)}</small></div></div>`).join("");
 }
 
@@ -824,16 +826,10 @@ function auditHTML(h) {
 }
 
 function monthlyCard(h, id) {
-  const pct = Math.min(100, (h.volRatio / 6) * 100);
-  const mark = Math.min(100, (SCREEN.volMult / 6) * 100);
   return `<article class="card" tabindex="0" data-id="${id}">
     <div class="card-top"><span class="tkr">${esc(h.ticker)}</span><span class="co">${esc(h.name)}</span><span class="sig-date">${esc(dateLabel(h.date))}</span></div>
     <div class="metaline"><span class="sector">${esc(h.sector || (MK[h.market] || {}).label)}</span><span class="per">${perHTML(h)}</span></div>
-    <div class="meter">
-      <div class="meter-head"><span class="cap">월 총거래량 <b>${vol(h.volume)}</b> vs 전월 ${vol(h.avgVol)}</span><span class="val">${nf(h.volRatio)}<em>배</em></span></div>
-      <div class="bar"><i style="width:${pct.toFixed(1)}%"></i><u style="left:${mark.toFixed(1)}%"></u></div>
-      <div class="meter-foot"><span>0</span><span>전월 대비 기준 ${esc(SCREEN.volMult)}x</span><span>6x+</span></div>
-    </div>
+    <p class="monthly-note">거래량 참고 · 판정 월 ${vol(h.volume)} · 전월 ${vol(h.avgVol)} · 전월 대비 ${Number.isFinite(h.volRatio) ? nf(h.volRatio) + "x" : "—"}</p>
     <div class="grid">
       <div class="cell hd"></div><div class="cell hd">월말 ${priceLabel(h)}</div><div class="cell hd">${esc(maLabel())}</div><div class="cell hd">이격</div>
       <div class="cell rl">판정 월<span>${esc(dateLabel(h.date))}</span></div>
@@ -926,12 +922,12 @@ function readoutHTML(h, i, isSignal) {
 /* ---------- table ---------- */
 function table(hits) {
   if (isMonthly()) return `<div class="tablewrap"><table>
-    <thead><tr><th>판정 월</th><th>티커</th><th>월말 가격 / 마지막 거래일</th><th>${esc(maLabel())}</th><th>이격</th><th>월 총거래량</th><th>전월 총거래량</th><th>전월 대비</th><th>직전 ${esc(SCREEN.belowMonths || 6)}개월</th><th>PER</th><th>선행 PER</th></tr></thead>
+    <thead><tr><th>판정 월</th><th>티커</th><th>월말 가격 / 마지막 거래일</th><th>${esc(maLabel())}</th><th>이격</th><th>월 총거래량(참고)</th><th>전월 총거래량(참고)</th><th>전월 대비(참고)</th><th>직전 ${esc(SCREEN.belowMonths || 6)}개월</th><th>PER</th><th>선행 PER</th></tr></thead>
     <tbody>${hits.map(h => `<tr>
       <td>${esc(dateLabel(h.date))}</td><td class="sym">${esc(h.ticker)}</td>
       <td>${px(signalClose(h), h)}<small class="table-date">${priceLabel(h)}${h.lastTradingDate ? " · " + esc(h.lastTradingDate) : ""}</small>${rawPriceHTML(signalClose(h), h.close, h)}</td>
       <td>${px(h.ma, h)}</td><td class="up">+${nf(h.abovePct)}%</td>
-      <td>${vol(h.volume)}</td><td>${vol(h.avgVol)}</td><td class="hot">${nf(h.volRatio)}x</td>
+      <td>${vol(h.volume)}</td><td>${vol(h.avgVol)}</td><td>${Number.isFinite(h.volRatio) ? nf(h.volRatio) + "x" : "—"}</td>
       <td>${auditHTML(h)}</td>
       <td>${h.per != null ? nf(h.per, 1) : (h.eps != null && h.eps < 0 ? "적자" : "—")}</td>
       <td>${h.forwardPer != null ? nf(h.forwardPer, 1) : "—"}</td>
@@ -963,6 +959,12 @@ const tableEl = document.getElementById("tableview");
 
 function sorted() {
   const a = SCREEN.hits.filter(h => h.market === curMarket);
+  if (isMonthly()) {
+    const gap = h => Number.isFinite(h.abovePct) ? h.abovePct : -Infinity;
+    const byGap = (x, y) => gap(y) - gap(x) || String(x.ticker).localeCompare(String(y.ticker));
+    a.sort(sortKey === "date" ? (x, y) => y.date.localeCompare(x.date) || byGap(x, y) : byGap);
+    return a;
+  }
   a.sort(sortKey === "date"
     ? (x, y) => y.date.localeCompare(x.date) || y.volRatio - x.volRatio
     : (x, y) => y.volRatio - x.volRatio);
@@ -974,7 +976,7 @@ function render() {
   if (!hits.length) {
     const m = MK[curMarket] || {};
     const empty = `<div class="empty">${esc(m.label)}${isMonthly()
-      ? "의 " + esc(m.targetMonth || dateLabel(m.latest)) + " 판정 월에는 직전 " + esc(SCREEN.belowMonths || 6) + "개월 하회·" + esc(maLabel()) + " 상향 돌파·전월 대비 거래량 " + esc(SCREEN.volMult) + "배 조건을 모두 만족한 종목이 없습니다. 진행 중인 월은 포함하지 않습니다."
+      ? "의 " + esc(m.targetMonth || dateLabel(m.latest)) + " 판정 월에는 직전 " + esc(SCREEN.belowMonths || 6) + "개월 하회와 " + esc(maLabel()) + " 상향 돌파 조건을 모두 만족한 종목이 없습니다. 진행 중인 월은 포함하지 않습니다."
       : "에서는 최근 " + esc(SCREEN.lookback) + "거래일 동안 조건을 만족한 종목이 없습니다."}</div>`;
     cardsEl.innerHTML = empty;
     tableEl.innerHTML = empty;
