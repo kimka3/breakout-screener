@@ -45,13 +45,15 @@ jobs:
 
       - name: 스크리너 실행
         run: |
-          python sp500_breakout.py --lookback 20 \
-            --html report.html --out breakouts_20d.csv --summary summary.txt
+          python sp500_breakout.py --lookback 20 --with-monthly \
+            --html report.html --out breakouts_20d.csv \
+            --monthly-out monthly_breakouts.csv --summary summary.txt
 
       - name: 결과 확인
         run: |
           test -s report.html || { echo "report.html 이 비어 있음"; exit 1; }
           test -s breakouts_20d.csv || { echo "breakouts_20d.csv 가 없거나 비어 있음"; exit 1; }
+          test -s monthly_breakouts.csv || { echo "monthly_breakouts.csv 가 없거나 비어 있음"; exit 1; }
           test -s summary.txt || { echo "summary.txt 이 비어 있음"; exit 1; }
           echo "생성 크기: $(wc -c < report.html) bytes"
           cat summary.txt
@@ -61,6 +63,7 @@ jobs:
           mkdir -p public
           cp report.html public/index.html
           cp breakouts_20d.csv public/breakouts.csv
+          cp monthly_breakouts.csv public/monthly_breakouts.csv
           # 홈 화면 아이콘 — 저장소에 커밋된 것을 그대로 배포한다
           cp apple-touch-icon.png favicon.png icon-512.png public/
           ls -l public/
@@ -71,6 +74,7 @@ jobs:
           path: |
             report.html
             breakouts_20d.csv
+            monthly_breakouts.csv
             summary.txt
           retention-days: 14
 
@@ -118,7 +122,7 @@ jobs:
           if [ "$JOB_STATUS" = "success" ] && [ -s summary.txt ]; then
             TEXT="$(cat summary.txt)"
           else
-            TEXT="[120일선 돌파 스크린] 실행 실패 ($JOB_STATUS)
+            TEXT="[돌파 스크리너] 실행 실패 ($JOB_STATUS)
           리포트가 갱신되지 않았습니다. 이전 결과는 그대로입니다.
           $RUN_URL"
           fi

@@ -153,35 +153,57 @@ NAVER_KPI200 = "https://finance.naver.com/sise/entryJongmok.naver?&page={page}&t
 
 def load_kospi200(refresh: bool = False) -> pd.DataFrame:
     """네이버 금융의 코스피200 편입종목 목록. KRX 직접 조회는 사내 프록시에서 막힌다."""
+    # 이전 캐시는 영숫자 티커를 누락하고 뒤 행의 이름을 잘못 연결할 수 있다.
+    # 기존 파일을 수정하지 않고, 행 단위 파서로 만든 캐시만 재사용한다.
+    cache_path = KOSPI200_CSV.with_name(KOSPI200_CSV.stem + "_v2.csv")
     if not refresh:
-        cached = _read_cached_csv(KOSPI200_CSV, dtype={"ticker": str})
+        cached = _read_cached_csv(cache_path, dtype={"ticker": str})
         if cached is not None:
             return cached
 
     try:
-        import io
         import re
+        from lxml import html as lxml_html
 
         found = {}
+        last_page = None
         for page in range(1, 30):
-            html = _http_get(NAVER_KPI200.format(page=page), encoding="cp949")
-            codes = list(dict.fromkeys(re.findall(r"code=(\d{6})", html)))
-            if not codes:
+            document = lxml_html.fromstring(
+                _http_get(NAVER_KPI200.format(page=page), encoding="cp949"))
+            links = document.xpath(
+                "//td[contains(concat(' ', normalize-space(@class), ' '), ' ctg ')]/a[@href]")
+            if not links:
+                if last_page is not None and page <= last_page:
+                    raise RuntimeError(f"편입종목 {page}/{last_page}페이지가 비어 있습니다")
                 break
-            table = pd.read_html(io.StringIO(html))[0].dropna(subset=["종목별"])
-            names = [str(x).strip() for x in table["종목별"].tolist()]
-            for code, name in zip(codes, names):
+
+            for link in links:
+                match = re.search(r"(?:[?&])code=([A-Za-z0-9]{6})(?:[&#]|$)", link.get("href"))
+                name = link.text_content().strip()
+                if match is None or not name:
+                    raise RuntimeError(f"편입종목 {page}페이지의 종목 행을 해석할 수 없습니다")
+                code = match.group(1).upper()
                 found.setdefault(code, name)
+
+            for href in document.xpath("//td[@class='pgRR']/a/@href"):
+                match = re.search(r"(?:[?&])page=(\d+)(?:[&#]|$)", href)
+                if match:
+                    last_page = int(match.group(1))
+            if last_page is not None:
+                if last_page >= 30:
+                    raise RuntimeError(f"편입종목 페이지 수가 예상 범위를 벗어났습니다: {last_page}")
+                if page >= last_page:
+                    break
         if not found:
             raise RuntimeError("편입종목을 찾지 못했습니다")
 
         df = pd.DataFrame({"ticker": list(found.keys()), "name": list(found.values())})
         df["sector"] = ""
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        df.to_csv(KOSPI200_CSV, index=False)
+        df.to_csv(cache_path, index=False)
         return df
     except Exception as exc:
-        cached = _read_cached_csv(KOSPI200_CSV, max_age_days=float("inf"), dtype={"ticker": str})
+        cached = _read_cached_csv(cache_path, max_age_days=float("inf"), dtype={"ticker": str})
         if cached is not None:
             print(f"[warn] 코스피200 목록 갱신 실패({exc}). 캐시를 사용합니다.", file=sys.stderr)
             return cached
@@ -515,7 +537,7 @@ def write_summary(rows, markets, args, out_path: Path, top=8):
     나머지는 개수로만 알린다. 자세한 건 링크에서 본다.
     """
     when = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M")
-    lines = [f"[{args.ma}일선 돌파 스크린] {when} KST", ""]
+    lines = [f"[돌파 스크리너] {when} KST", "", f"{args.ma}일선 돌파", ""]
     if getattr(args, "date", None):
         lines.extend([f"과거 가격 기준 {args.date} · 구성종목과 재무지표는 현재 조회 자료", ""])
 
@@ -542,6 +564,19 @@ def write_summary(rows, markets, args, out_path: Path, top=8):
                 lines.append(f"  … 외 {len(hits) - top}건")
         lines.append("")
 
+    monthly = getattr(args, "monthly_payload", None)
+    if monthly is not None:
+        lines.extend(["10개월선 장기 돌파 · 직전 6개월 이평선 아래 · 전월 대비 거래량 2배", ""])
+        for m in monthly["markets"]:
+            hits = [h for h in monthly["hits"] if h["market"] == m["id"]]
+            lines.append(f"{m['label']} · 기준월 {m['targetMonth']} · {len(hits)}건")
+            if not hits:
+                lines.append("  해당 없음")
+            for h in sorted(hits, key=lambda h: -h["volRatio"])[:top]:
+                lines.append(f"  {h['ticker']} {h['name'][:14]}  {h['volRatio']:.2f}x")
+            if len(hits) > top:
+                lines.append(f"  … 외 {len(hits) - top}건")
+            lines.append("")
     lines.append(PAGES_URL)
     out_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"요약: {out_path.resolve()}")
@@ -559,6 +594,9 @@ def write_html(charts, args, markets, out_path: Path):
         return
 
     payload = {
+        "id": "daily",
+        "label": f"{args.ma}일선 돌파",
+        "timeframe": "day",
         "generatedAt": datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M") + " KST",
         "historicalAsOf": getattr(args, "date", None),
         "fundamentalsAsOf": getattr(args, "fundamentals_as_of", None),
@@ -571,6 +609,10 @@ def write_html(charts, args, markets, out_path: Path):
         "requireHold": not args.no_hold,
         "hits": charts,
     }
+    monthly = getattr(args, "monthly_payload", None)
+    if monthly is not None:
+        # Retain the legacy daily keys for consumers of earlier report payloads.
+        payload["screens"] = [dict(payload), monthly]
     # 외부 종목명에 </script>가 있어도 인라인 데이터 영역을 벗어나지 않게 한다.
     encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False,
                          separators=(",", ":")).replace("<", "\\u003c")
@@ -587,14 +629,14 @@ def write_html(charts, args, markets, out_path: Path):
         '<link rel="apple-touch-icon" href="apple-touch-icon.png">\n'
         '<link rel="icon" type="image/png" sizes="32x32" href="favicon.png">\n'
         '<link rel="icon" type="image/png" sizes="512x512" href="icon-512.png">\n'
-        '<meta name="apple-mobile-web-app-title" content="돌파 스크린">\n'
+        '<meta name="apple-mobile-web-app-title" content="돌파 스크리너">\n'
         '<meta name="theme-color" media="(prefers-color-scheme: light)" content="#EEF1F2">\n'
         '<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0E1315">\n'
         "</head>\n<body>\n" + fragment + "\n</body>\n</html>\n"
     )
     out_path.write_text(standalone, encoding="utf-8")
     print(f"HTML: {out_path.resolve()}")
-    print(f"      {artifact_path.resolve()}  (Artifact 게시용)")
+    print(f"      {artifact_path.resolve()}  (돌파 스크리너 삽입용 조각)")
 
 
 # --------------------------------------------------------------------------
@@ -623,6 +665,10 @@ def main() -> int:
                    help="신호 계산 기준가: adj=수정주가(배당/분할 반영), raw=종가 그대로")
     p.add_argument("--market", choices=["all", "sp500", "kospi200"], default="all",
                    help="스캔할 시장")
+    p.add_argument("--with-monthly", action="store_true",
+                   help="마지막 마감 월봉의 10개월선 장기 돌파를 함께 검사")
+    p.add_argument("--monthly-out", default="monthly_breakouts.csv",
+                   help="장기 돌파 결과 CSV 경로 (--with-monthly 사용 시)")
     p.add_argument("--tickers", default=None, help="쉼표구분 티커 목록(테스트용)")
     p.add_argument("--refresh-list", action="store_true", help="구성종목 목록 강제 갱신")
     p.add_argument("--out", default="breakouts.csv", help="결과 CSV 경로")
@@ -634,6 +680,8 @@ def main() -> int:
     p.add_argument("--no-hold", action="store_true",
                    help="돌파 후 현재가가 이동평균선 아래로 다시 내려간 종목도 포함")
     args = p.parse_args()
+    if args.with_monthly and Path(args.out).resolve() == Path(args.monthly_out).resolve():
+        p.error("일봉과 월봉 결과 CSV 경로는 서로 달라야 합니다")
     for name in ("ma", "vol_window", "lookback"):
         if getattr(args, name) <= 0:
             p.error(f"--{name.replace('_', '-')}는 양의 정수여야 합니다")
@@ -654,6 +702,9 @@ def main() -> int:
     # HTML 리포트는 차트 구간 내내 MA 선이 그려져야 하므로 그만큼 더 받는다.
     span = args.ma + args.vol_window + args.lookback + (CHART_WINDOW if args.html else 0)
     start_date = end_date - timedelta(days=int(span * 1.55) + 40)
+    if args.with_monthly:
+        # Full calendar months for monthly OHLCV and a useful long-term chart.
+        start_date = min(start_date, (pd.Period(end_date, freq="M") - 48).start_time.date())
 
     print(f"기간: {start_date} ~ {end_date}")
     print(f"조건: 종가 > MA{args.ma} 상향돌파 & 거래량 >= 직전 {args.vol_window}거래일 평균 x {args.vol_mult}"
@@ -661,6 +712,7 @@ def main() -> int:
 
     selected = list(MARKETS) if args.market == "all" else [args.market]
     rows, charts, market_summaries = [], [], []
+    monthly_rows, monthly_charts, monthly_markets = [], [], []
     scan_errors = []
 
     for mk in selected:
@@ -680,6 +732,20 @@ def main() -> int:
         prices = download_prices(meta["yahoo"].tolist(), start_date, end_date,
                                  use_cache=not args.no_cache)
         n_failed = len(set(meta["yahoo"]) - set(prices))
+        if args.with_monthly:
+            from monthly_breakout import scan_monthly_market
+
+            # On the first KST day, the US can still be trading the previous month.
+            # Use each market's local calendar so that a partial month is never final.
+            monthly_as_of = end_date if args.date else datetime.now(ZoneInfo(spec["tz"]))
+            mr, mc, ms = scan_monthly_market(prices, meta, mk, monthly_as_of, args.price_basis)
+            monthly_rows.extend(mr)
+            monthly_charts.extend(mc)
+            monthly_markets.append(ms)
+            print(f"[{spec['label']} / 장기] 기준월 {ms['targetMonth']} · "
+                  f"{ms['scanned']}종목 평가 · {ms['hits']}건")
+            if not ms["scanned"] or ms.get("degraded"):
+                scan_errors.append(spec["label"] + " 장기 월봉")
         prices = {t: drop_partial_bar(df, mk) for t, df in prices.items()}
         # 과거 데이터가 짧으면 이동평균이 계산되지 않아 신호가 조용히 사라진다.
         # MA 는 앞선 ma 봉이 있어야 나오므로, 검색 구간 전체를 평가하려면
@@ -831,7 +897,7 @@ def main() -> int:
         })
 
     if scan_errors:
-        print("[error] 평가 가능한 시세가 없는 시장: " + ", ".join(scan_errors)
+        print("[error] 평가 불가 또는 광범위한 데이터 결손이 있는 시장: " + ", ".join(scan_errors)
               + ". 정상적인 0건 결과와 구분하기 위해 출력을 갱신하지 않습니다.", file=sys.stderr)
         return 1
 
@@ -840,17 +906,12 @@ def main() -> int:
 
     if not rows:
         print("\n조건을 만족하는 종목이 없습니다.")
-        pd.DataFrame(columns=result_columns(args)).to_csv(
-            Path(args.out), index=False, encoding="utf-8-sig")
-        if args.html:
-            write_html([], args, market_summaries, Path(args.html))
-        if args.summary:
-            write_summary([], market_summaries, args, Path(args.summary))
-        return 0
 
-    args.fundamentals_as_of = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M") + " KST"
-    funda = fetch_fundamentals(sorted({r["_y"] for r in rows}))
-    for r in rows:
+    all_rows = rows + monthly_rows
+    args.fundamentals_as_of = (datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M")
+                               + " KST") if all_rows else None
+    funda = fetch_fundamentals(sorted({r["_y"] for r in all_rows})) if all_rows else {}
+    for r in all_rows:
         f = funda.get(r.pop("_y"), {})
         r["fundamentals_as_of"] = args.fundamentals_as_of
         r["per"] = _num(f.get("per"))
@@ -858,7 +919,7 @@ def main() -> int:
         r["eps"] = _num(f.get("eps"))
         if not str(r.get("sector") or "").strip():
             r["sector"] = _text(f.get("sector"))
-    for c in charts:
+    for c in charts + monthly_charts:
         f = funda.get(c.pop("_y"), {})
         c["per"] = _num(f.get("per"))
         c["forwardPer"] = _num(f.get("forward_per"))
@@ -876,6 +937,25 @@ def main() -> int:
     out_path = Path(args.out)
     res.to_csv(out_path, index=False, encoding="utf-8-sig")
     print(f"\n저장: {out_path.resolve()}")
+
+    if args.with_monthly:
+        from monthly_breakout import monthly_result_columns
+
+        monthly_res = pd.DataFrame(monthly_rows, columns=monthly_result_columns())
+        if not monthly_res.empty:
+            monthly_res = monthly_res.sort_values(["market", "date", "vol_ratio"],
+                                                 ascending=[True, False, False])
+        monthly_res.to_csv(Path(args.monthly_out), index=False, encoding="utf-8-sig")
+        monthly_charts.sort(key=lambda c: (c["date"], c["volRatio"]), reverse=True)
+        args.monthly_payload = {
+            "id": "monthly", "label": "10개월선 장기 돌파", "timeframe": "month",
+            "generatedAt": datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M") + " KST",
+            "historicalAsOf": args.date, "fundamentalsAsOf": args.fundamentals_as_of,
+            "markets": monthly_markets, "hits": monthly_charts,
+            "maPeriod": 10, "belowMonths": 6, "volWindow": 1, "volMult": 2,
+            "lookback": 1, "priceBasis": args.price_basis, "requireHold": False,
+        }
+        print(f"장기 CSV: {Path(args.monthly_out).resolve()} ({len(monthly_res)}건)")
 
     if args.html:
         charts.sort(key=lambda c: (c["date"], c["volRatio"]), reverse=True)
