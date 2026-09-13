@@ -569,7 +569,7 @@ def write_summary(rows, markets, args, out_path: Path, top=8):
 
     monthly = getattr(args, "monthly_payload", None)
     if monthly is not None:
-        lines.extend(["10개월선 장기 돌파 · 직전 6개월 이평선 아래", ""])
+        lines.extend(["10개월선 장기 돌파 · 직전 6개월 이평선 아래 · 거래량 > 직전 3개월 평균", ""])
         for m in monthly["markets"]:
             hits = [h for h in monthly["hits"] if h["market"] == m["id"]]
             lines.append(f"{m['label']} · 기준월 {m['targetMonth']} · {len(hits)}건")
@@ -735,6 +735,9 @@ def main() -> int:
         prices = download_prices(meta["yahoo"].tolist(), start_date, end_date,
                                  use_cache=not args.no_cache)
         n_failed = len(set(meta["yahoo"]) - set(prices))
+        # Monthly charts also show the latest completed daily close. Remove the
+        # in-progress daily bar before either strategy consumes the same feed.
+        prices = {t: drop_partial_bar(df, mk) for t, df in prices.items()}
         if args.with_monthly:
             from monthly_breakout import scan_monthly_market
 
@@ -749,7 +752,6 @@ def main() -> int:
                   f"{ms['scanned']}종목 평가 · {ms['hits']}건")
             if not ms["scanned"] or ms.get("degraded"):
                 scan_errors.append(spec["label"] + " 장기 월봉")
-        prices = {t: drop_partial_bar(df, mk) for t, df in prices.items()}
         # 과거 데이터가 짧으면 이동평균이 계산되지 않아 신호가 조용히 사라진다.
         # MA 는 앞선 ma 봉이 있어야 나오므로, 검색 구간 전체를 평가하려면
         # ma + lookback 봉이 필요하다. 그에 못 미치는 종목을 따로 센다.
@@ -955,8 +957,8 @@ def main() -> int:
             "generatedAt": datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M") + " KST",
             "historicalAsOf": args.date, "fundamentalsAsOf": args.fundamentals_as_of,
             "markets": monthly_markets, "hits": monthly_charts,
-            "maPeriod": 10, "belowMonths": 6, "volWindow": 1, "volMult": None,
-            "volumeFilter": False,
+            "maPeriod": 10, "belowMonths": 6, "volWindow": 3, "volMult": 1,
+            "volumeFilter": True, "volumeComparison": "gt",
             "lookback": 1, "priceBasis": args.price_basis, "requireHold": False,
         }
         print(f"장기 CSV: {Path(args.monthly_out).resolve()} ({len(monthly_res)}건)")

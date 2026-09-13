@@ -26,25 +26,28 @@ def long_history():
 
 
 class CombinedTests(unittest.TestCase):
-    def test_monthly_output_allows_unavailable_volume_ratio(self):
+    def test_monthly_invalid_volume_is_reported_without_losing_valid_results(self):
         frame = long_history()
         frame.loc["2026-07-31", "Volume"] = float("nan")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            args = ["sp500_breakout.py", "--with-monthly", "--market", "sp500", "--tickers", "TEST",
+            args = ["sp500_breakout.py", "--with-monthly", "--market", "sp500", "--tickers", "TEST,BAD",
                     "--date", "2026-09-13", "--ma", "3", "--lookback", "1", "--no-hold",
                     "--out", str(root / "d.csv"), "--monthly-out", str(root / "m.csv"),
                     "--html", str(root / "r.html"), "--summary", str(root / "s.txt")]
             with patch.object(sys, "argv", args), \
-                 patch.object(screener, "download_prices", return_value={"TEST": frame}), \
+                 patch.object(screener, "download_prices", return_value={"TEST": long_history(), "BAD": frame}), \
                  patch.object(screener, "fetch_fundamentals", return_value={}), \
                  redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 self.assertEqual(screener.main(), 0)
             monthly = report_payload(root / "r.html")["screens"][1]
-            self.assertFalse(monthly["volumeFilter"])
+            self.assertTrue(monthly["volumeFilter"])
+            self.assertEqual(monthly["volWindow"], 3)
+            self.assertEqual(monthly["volumeComparison"], "gt")
             self.assertEqual(len(monthly["hits"]), 1)
-            self.assertIsNone(monthly["hits"][0]["volRatio"])
-            self.assertIsNone(monthly["hits"][0]["avgVol"])
+            self.assertEqual(monthly["hits"][0]["ticker"], "TEST")
+            self.assertGreater(monthly["hits"][0]["volume"], monthly["hits"][0]["avgVol"])
+            self.assertEqual(monthly["markets"][0]["invalidData"], 1)
             self.assertEqual(len(pd.read_csv(root / "m.csv")), 1)
             self.assertNotIn("전월 대비 거래량 2배", (root / "s.txt").read_text(encoding="utf-8"))
 
@@ -104,13 +107,42 @@ class CombinedTests(unittest.TestCase):
             self.assertEqual(day["maPeriod"], 3)
             self.assertEqual(day["volMult"], 99)
             self.assertEqual(month["maPeriod"], 10)
-            self.assertIsNone(month["volMult"])
-            self.assertFalse(month["volumeFilter"])
+            self.assertEqual(month["volMult"], 1)
+            self.assertEqual(month["volWindow"], 3)
+            self.assertTrue(month["volumeFilter"])
+            self.assertEqual(month["volumeComparison"], "gt")
             self.assertEqual(month["belowMonths"], 6)
             self.assertEqual(len(month["hits"]), 2)
             self.assertTrue(all(m["targetMonth"] == "2026-08" for m in month["markets"]))
             self.assertTrue(all(h["date"] == "2026-08-31" for h in month["hits"]))
+            self.assertTrue(all(h["latestDate"] == "2026-09-11" for h in month["hits"]))
+            self.assertTrue(all(h["latestSignalClose"] == 1 for h in month["hits"]))
+            self.assertEqual(set(monthly["latest_date"]), {"2026-09-11"})
+            self.assertEqual(set(monthly["latest_close"]), {1})
             self.assertIn("10개월선 장기 돌파", (root / "summary.txt").read_text(encoding="utf-8"))
+
+    def test_monthly_latest_quote_excludes_the_current_intraday_bar(self):
+        from zoneinfo import ZoneInfo
+
+        instant = datetime(2026, 9, 11, 11, tzinfo=ZoneInfo("America/New_York"))
+        frame = long_history()
+        frame.loc["2026-09-11", ["Close", "Adj Close"]] = 999
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = ["sp500_breakout.py", "--with-monthly", "--market", "sp500", "--tickers", "TEST",
+                    "--ma", "3", "--lookback", "1", "--out", str(root / "d.csv"),
+                    "--monthly-out", str(root / "m.csv"), "--html", str(root / "r.html")]
+            with patch.object(sys, "argv", args), \
+                 patch.object(screener, "datetime", wraps=datetime) as clock, \
+                 patch.object(screener, "download_prices", return_value={"TEST": frame}), \
+                 patch.object(screener, "fetch_fundamentals", return_value={}), \
+                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                clock.now.side_effect = lambda tz=None: instant.astimezone(tz)
+                self.assertEqual(screener.main(), 0)
+            hit = report_payload(root / "r.html")["screens"][1]["hits"][0]
+            self.assertEqual(hit["latestDate"], "2026-09-10")
+            self.assertEqual(hit["latestClose"], 1)
+            self.assertEqual(hit["dates"][-1], "2026-08-31")
 
     def test_monthly_failure_does_not_overwrite_previous_reports(self):
         # This daily feed is sufficient for MA3 but cannot evaluate sixteen months.

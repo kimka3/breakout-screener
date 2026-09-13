@@ -43,7 +43,7 @@ class MonthlySignalTests(unittest.TestCase):
             with self.subTest(as_of=as_of):
                 self.assertEqual(str(monthly.last_completed_month(as_of)), expected)
 
-    def test_six_below_months_then_breakout_retains_reference_volume(self):
+    def test_six_below_months_then_breakout_uses_three_month_volume_average(self):
         rows, charts, summary = self.scan(daily_history())
         self.assertEqual(summary["scanned"], 1)
         self.assertEqual(summary["hits"], 1)
@@ -53,18 +53,27 @@ class MonthlySignalTests(unittest.TestCase):
         row, chart = rows[0], charts[0]
         self.assertEqual(row["volume"], 200)
         self.assertEqual(row["previous_month_volume"], 100)
+        self.assertEqual(row["avg_volume_3m"], 100)
         self.assertEqual(row["vol_ratio"], 2)
+        self.assertEqual(row["volume_window_start"], "2026-05")
+        self.assertEqual(row["volume_window_end"], "2026-07")
         self.assertEqual(row["ma10"], 95)
         self.assertEqual(row["date"], "2026-08-31")
         self.assertEqual(row["last_trading_date"], "2026-08-31")
         self.assertEqual(row["close"], row["last_close"])
         self.assertEqual(row["return_since_%"], 0)
+        self.assertEqual(row["latest_date"], "2026-08-31")
+        self.assertEqual(row["latest_close"], 110)
+        self.assertEqual(row["latest_signal_close"], 110)
         self.assertEqual(chart["sigIndex"], len(chart["dates"]) - 1)
         self.assertEqual(chart["dates"][-1], row["date"])
         audit = chart["previousMonths"]
         self.assertEqual(len(audit), 6)
         self.assertEqual(audit[0], {"month": "2026-02", "close": 90, "ma": 99, "below": True})
         self.assertEqual(audit[-1], {"month": "2026-07", "close": 90, "ma": 94, "below": True})
+        self.assertEqual(chart["avgVol"], 100)
+        self.assertEqual(chart["priorVolumeMonths"],
+                         [{"month": month, "volume": 100} for month in ("2026-05", "2026-06", "2026-07")])
         self.assertIn("2026-02-28", chart["dates"])
         json.dumps({"rows": rows, "charts": charts, "summary": summary}, allow_nan=False)
 
@@ -82,53 +91,80 @@ class MonthlySignalTests(unittest.TestCase):
         self.assertEqual(summary["scanned"], 1)
         self.assertEqual(rows, [])
 
-    def test_adbe_like_volume_decline_does_not_reject_a_price_breakout(self):
-        rows, charts, summary = self.scan(daily_history(
-            monthly_volumes=[100] * 14 + [127335100, 90134000]))
+    def test_adbe_like_volumes_fail_the_new_three_month_average_condition(self):
+        rows, _, summary = self.scan(daily_history(
+            monthly_volumes=[100] * 12 + [93855600, 184311800, 127335100, 90134000]))
         self.assertEqual(summary["scanned"], 1)
-        self.assertEqual(summary["hits"], 1)
-        self.assertEqual(rows[0]["volume"], 90134000)
-        self.assertEqual(rows[0]["previous_month_volume"], 127335100)
-        self.assertAlmostEqual(rows[0]["volume"] / rows[0]["previous_month_volume"],
-                               0.7078488178043603)
-        self.assertEqual(rows[0]["vol_ratio"], 0.71)
-        self.assertEqual(charts[0]["volRatio"], 0.71)
+        self.assertEqual(summary["hits"], 0)
+        self.assertEqual(rows, [])
 
-    def test_missing_or_unusable_volume_never_blocks_valid_price_signals(self):
-        for case, value in (("zero", 0.0), ("nan", float("nan")),
-                            ("infinity", float("inf")), ("negative", -1.0),
-                            ("missing column", None)):
-            with self.subTest(case=case):
+    def test_volume_mean_uses_three_prior_months_not_previous_only_or_current(self):
+        for prior, target, passes in (([100, 100, 300], 200, True),
+                                      ([300, 300, 100], 200, False),
+                                      ([100, 200, 300], 230, True)):
+            with self.subTest(prior=prior, target=target):
+                rows, charts, summary = self.scan(daily_history(
+                    monthly_volumes=[100] * 12 + prior + [target]))
+                self.assertEqual(summary["scanned"], 1)
+                self.assertEqual(len(rows), int(passes))
+                if passes:
+                    average = sum(prior) / 3
+                    self.assertAlmostEqual(rows[0]["avg_volume_3m"], average, places=3)
+                    self.assertEqual(rows[0]["previous_month_volume"], prior[-1])
+                    self.assertEqual(charts[0]["avgVol"], rows[0]["avg_volume_3m"])
+                    self.assertEqual(charts[0]["volRatio"], round(target / average, 2))
+                    self.assertEqual([m["volume"] for m in charts[0]["priorVolumeMonths"]], prior)
+
+    def test_volume_equal_to_previous_three_month_average_fails_strict_comparison(self):
+        rows, _, summary = self.scan(daily_history(monthly_volumes=[100] * 12 + [100, 200, 300, 200]))
+        self.assertEqual(summary["scanned"], 1)
+        self.assertEqual(rows, [])
+
+    def test_zero_average_allows_positive_volume_but_not_zero_volume(self):
+        for target_zero in (False, True):
+            with self.subTest(target_zero=target_zero):
                 frame = daily_history()
-                if case == "missing column":
-                    frame = frame.drop(columns="Volume")
-                else:
-                    frame["Volume"] = value
+                zero_end = "2026-08" if target_zero else "2026-07"
+                zero_mask = ((frame.index.to_period("M") >= pd.Period("2026-05"))
+                             & (frame.index.to_period("M") <= pd.Period(zero_end)))
+                frame.loc[zero_mask, "Volume"] = 0
                 rows, charts, summary = self.scan(frame)
                 self.assertEqual(summary["scanned"], 1)
-                self.assertEqual(summary["hits"], 1)
+                self.assertEqual(summary["hits"], int(not target_zero))
                 self.assertEqual(summary["invalidData"], 0)
-                expected = 0 if case == "zero" else None
-                self.assertEqual(rows[0]["volume"], expected)
-                self.assertEqual(rows[0]["previous_month_volume"], expected)
-                self.assertIsNone(rows[0]["vol_ratio"])
-                self.assertEqual(charts[0]["volumes"], [expected] * 16)
+                if not target_zero:
+                    self.assertEqual(rows[0]["volume"], 200)
+                    self.assertEqual(rows[0]["avg_volume_3m"], 0)
+                    self.assertIsNone(rows[0]["vol_ratio"])
+                    self.assertEqual(charts[0]["avgVol"], 0)
                 json.dumps({"rows": rows, "charts": charts, "summary": summary}, allow_nan=False)
 
-    def test_partial_missing_reference_volume_does_not_become_a_valid_monthly_total(self):
-        for month in ("2026-07", "2026-08"):
-            with self.subTest(month=month):
-                frame = daily_history()
-                frame["Volume"] = frame["Volume"].astype(float)
-                missing_day = frame.index[frame.index.to_period("M") == pd.Period(month)][3]
-                frame.loc[missing_day, "Volume"] = float("nan")
-                rows, charts, summary = self.scan(frame)
-                self.assertEqual(summary["hits"], 1)
-                self.assertEqual(rows[0]["volume"], 200 if month == "2026-07" else None)
-                self.assertEqual(rows[0]["previous_month_volume"], 100 if month == "2026-08" else None)
-                self.assertIsNone(rows[0]["vol_ratio"])
-                self.assertIsNone(charts[0]["volumes"][-2 if month == "2026-07" else -1])
-                json.dumps({"rows": rows, "charts": charts}, allow_nan=False)
+    def test_invalid_or_partial_volume_in_target_or_previous_three_months_is_excluded(self):
+        for month in ("2026-05", "2026-06", "2026-07", "2026-08"):
+            for value in (float("nan"), float("inf"), -1.0):
+                with self.subTest(month=month, value=value):
+                    frame = daily_history()
+                    frame["Volume"] = frame["Volume"].astype(float)
+                    missing_day = frame.index[frame.index.to_period("M") == pd.Period(month)][3]
+                    frame.loc[missing_day, "Volume"] = value
+                    rows, _, summary = self.scan(frame)
+                    self.assertEqual(rows, [])
+                    self.assertEqual(summary["scanned"], 0)
+                    self.assertEqual(summary["invalidData"], 1)
+                    self.assertIn("Volume", summary["exclusions"]["TEST"]["detail"])
+        rows, _, summary = self.scan(daily_history().drop(columns="Volume"))
+        self.assertEqual(rows, [])
+        self.assertEqual(summary["invalidData"], 1)
+
+    def test_older_missing_volume_does_not_exclude_a_valid_signal(self):
+        frame = daily_history()
+        frame["Volume"] = frame["Volume"].astype(float)
+        frame.loc[frame.index.to_period("M") < pd.Period("2026-05"), "Volume"] = float("nan")
+        rows, charts, summary = self.scan(frame)
+        self.assertEqual(summary["hits"], 1)
+        self.assertEqual(summary["invalidData"], 0)
+        self.assertEqual(charts[0]["volumes"][:-4], [None] * 12)
+        json.dumps({"rows": rows, "charts": charts}, allow_nan=False)
 
     def test_current_incomplete_month_is_ignored_and_no_present_day_hold_is_applied(self):
         frame = daily_history()
@@ -140,6 +176,55 @@ class MonthlySignalTests(unittest.TestCase):
         self.assertEqual(rows[0]["signal_close"], 110)
         self.assertEqual(charts[0]["dates"][-1], "2026-08-31")
         self.assertEqual(charts[0]["lastSignalClose"], 110)
+        self.assertEqual(charts[0]["latestDate"], "2026-09-01")
+        self.assertEqual(charts[0]["latestSignalClose"], 1)
+
+    def test_latest_daily_quote_is_separate_from_monthly_signal_and_clamped_to_as_of(self):
+        for basis in ("adj", "raw"):
+            with self.subTest(basis=basis):
+                frame = daily_history()
+                frame["Adj Close"] = frame["Close"] * 0.5
+                current = pd.DataFrame({
+                    "Open": [69.0, 79.0, 998.0], "High": [71.0, 81.0, 1000.0],
+                    "Low": [68.0, 78.0, 997.0], "Close": [70.0, 80.0, 999.0],
+                    "Adj Close": [35.0, 40.0, 499.5], "Volume": [1, 1, 1],
+                }, index=pd.DatetimeIndex(["2026-09-01", "2026-09-11", "2026-09-14"]))
+                rows, charts, summary = self.scan(pd.concat([frame, current]), price_basis=basis)
+                self.assertEqual(summary["hits"], 1)
+                row, chart = rows[0], charts[0]
+                target_signal = 55 if basis == "adj" else 110
+                latest_signal = 40 if basis == "adj" else 80
+                self.assertEqual(row["date"], "2026-08-31")
+                self.assertEqual(row["signal_close"], target_signal)
+                self.assertEqual(row["last_close"], 110)
+                self.assertEqual(row["last_signal_close"], target_signal)
+                self.assertEqual(row["latest_date"], "2026-09-11")
+                self.assertEqual(row["latest_close"], 80)
+                self.assertEqual(row["latest_signal_close"], latest_signal)
+                self.assertEqual(chart["dates"][-1], "2026-08-31")
+                self.assertEqual(chart["closes"][-1], target_signal)
+                self.assertEqual(chart["latestDate"], row["latest_date"])
+                self.assertEqual(chart["latestClose"], 80)
+                self.assertEqual(chart["latestSignalClose"], latest_signal)
+
+    def test_invalid_newest_quote_does_not_fall_back_or_change_completed_month_signal(self):
+        for column, value in (("Close", 0), ("Adj Close", float("nan")),
+                              ("Adj Close", float("inf"))):
+            with self.subTest(column=column, value=value):
+                current = pd.DataFrame({
+                    "Open": [69.0, 79.0], "High": [71.0, 81.0], "Low": [68.0, 78.0],
+                    "Close": [70.0, 80.0], "Adj Close": [35.0, 40.0], "Volume": [1, 1],
+                }, index=pd.DatetimeIndex(["2026-09-01", "2026-09-11"]))
+                current.loc[pd.Timestamp("2026-09-11"), column] = value
+                rows, charts, summary = self.scan(pd.concat([daily_history(), current]))
+                self.assertEqual(summary["hits"], 1)
+                self.assertEqual(rows[0]["latest_date"], "2026-09-11")
+                self.assertIsNone(rows[0]["latest_close"])
+                self.assertIsNone(rows[0]["latest_signal_close"])
+                self.assertEqual(charts[0]["latestDate"], "2026-09-11")
+                self.assertIsNone(charts[0]["latestClose"])
+                self.assertIsNone(charts[0]["latestSignalClose"])
+                json.dumps({"rows": rows, "charts": charts}, allow_nan=False)
 
     def test_fifteen_months_are_insufficient_to_evaluate_all_six_prior_smas(self):
         frame = daily_history()

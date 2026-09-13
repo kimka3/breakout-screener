@@ -14,6 +14,7 @@ import pandas as pd
 
 MA_MONTHS = 10
 BELOW_MONTHS = 6
+VOLUME_MONTHS = 3
 REQUIRED_MONTHS = MA_MONTHS + BELOW_MONTHS
 CHART_MONTHS = 36
 MARKET_DISPLAY = {
@@ -35,9 +36,11 @@ def last_completed_month(as_of):
 def monthly_result_columns():
     return ["market", "date", "target_month", "last_trading_date", "ticker", "name",
             "sector", "close", "signal_close", "ma10", "above_ma_%", "volume",
-            "previous_month_volume", "vol_ratio", "prior_below_start", "prior_below_end",
+            "previous_month_volume", "avg_volume_3m", "vol_ratio", "volume_window_start",
+            "volume_window_end", "prior_below_start", "prior_below_end",
             "prior_below_months", "last_close", "last_signal_close", "last_above_ma_%",
-            "return_since_%", "bars_since", "price_basis", "per", "forward_per", "eps",
+            "return_since_%", "bars_since", "latest_date", "latest_close",
+            "latest_signal_close", "price_basis", "per", "forward_per", "eps",
             "fundamentals_as_of"]
 
 
@@ -70,7 +73,7 @@ def _numeric(series, positive=True):
 
 
 def _optional_volume(value):
-    """Volume is reference data: preserve valid zeroes, serialize bad totals as null."""
+    """Preserve valid zeroes and serialize unavailable historical totals as null."""
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -78,12 +81,44 @@ def _optional_volume(value):
     return int(number) if math.isfinite(number) and number >= 0 else None
 
 
+def _latest_quote(frame, as_of, price_basis):
+    """Read the newest supplied daily row up to as_of; never backfill a bad quote.
+
+    The caller removes unfinished daily bars. This function separately prevents
+    future rows from leaking into a historical run and does not affect screening.
+    """
+    index = frame.index
+    if index.tz is not None:
+        index = index.tz_localize(None)
+    index = index.normalize()
+    cutoff = pd.Timestamp(as_of)
+    if cutoff.tzinfo is not None:
+        cutoff = cutoff.tz_localize(None)
+    usable = frame.loc[index <= cutoff.normalize()].copy()
+    usable.index = index[index <= cutoff.normalize()]
+    if usable.empty:
+        return None, None, None
+    latest_date = usable.index.max()
+    latest = usable.loc[usable.index == latest_date]
+    result_date = latest_date.date().isoformat()
+    if len(latest) != 1:
+        return result_date, None, None
+    basis_column = "Adj Close" if price_basis == "adj" else "Close"
+    if "Close" not in latest or basis_column not in latest:
+        return result_date, None, None
+    raw = _numeric(latest["Close"]).iloc[0]
+    selected = _numeric(latest[basis_column]).iloc[0]
+    if pd.isna(raw) or pd.isna(selected):
+        return result_date, None, None
+    return result_date, float(raw), float(selected)
+
+
 def aggregate_monthly_prices(frame, target_month, price_basis="adj"):
     """Adjust each DAILY OHLC first, then aggregate completed calendar months.
 
     Close is the selected signal basis; RawClose retains the provider Close.
     A missing observation never silently becomes a valid monthly extreme/total.
-    Volume is optional reference data and never determines signal eligibility.
+    The scanner validates volume for the target and preceding three months.
     """
     if price_basis not in ("adj", "raw"):
         raise ValueError("price_basis must be adj or raw")
@@ -126,7 +161,7 @@ def aggregate_monthly_prices(frame, target_month, price_basis="adj"):
     return monthly
 
 
-def _chart(monthly, row, audit, yahoo):
+def _chart(monthly, row, audit, volume_audit, yahoo):
     window = monthly.iloc[-CHART_MONTHS:]
 
     def clean(column):
@@ -139,7 +174,9 @@ def _chart(monthly, row, audit, yahoo):
         "lastTradingDate": row["last_trading_date"], "close": row["close"],
         "signalClose": row["signal_close"], "priceBasis": row["price_basis"],
         "ma": row["ma10"], "abovePct": row["above_ma_%"], "volume": row["volume"],
-        "avgVol": row["previous_month_volume"], "volRatio": row["vol_ratio"],
+        "avgVol": row["avg_volume_3m"], "volRatio": row["vol_ratio"],
+        "latestDate": row["latest_date"], "latestClose": row["latest_close"],
+        "latestSignalClose": row["latest_signal_close"],
         "lastClose": row["last_close"], "lastSignalClose": row["last_signal_close"],
         "lastMa": row["ma10"], "lastPct": row["last_above_ma_%"], "retPct": 0.0,
         "barsSince": 0, "sigIndex": len(window) - 1,
@@ -147,7 +184,7 @@ def _chart(monthly, row, audit, yahoo):
         "opens": clean("Open"), "highs": clean("High"), "lows": clean("Low"),
         "closes": clean("Close"), "mas": clean("MA"),
         "volumes": [_optional_volume(v) for v in window["Volume"]],
-        "previousMonths": audit, "_y": yahoo,
+        "previousMonths": audit, "priorVolumeMonths": volume_audit, "_y": yahoo,
     }
 
 
@@ -158,7 +195,9 @@ def scan_monthly_market(prices, meta, market, as_of, price_basis="adj"):
     peer session within those 16 months must exist in the security's data; this
     covers monthly endpoints and the OHLC bars shown in the chart. The target
     close must exceed SMA10, and each of the preceding six closes must be strictly
-    below its own SMA10. Volume totals and ratios are optional display data.
+    below its own SMA10. Target volume must be strictly above the arithmetic mean
+    of the preceding three complete monthly totals. Latest daily quotes are
+    separate display fields and never change the completed-month predicate.
     Bad securities are excluded, counted, and never replaced by an older signal.
     """
     if market not in MARKET_DISPLAY:
@@ -168,6 +207,7 @@ def scan_monthly_market(prices, meta, market, as_of, price_basis="adj"):
     target = last_completed_month(as_of)
     required_months = pd.period_range(target - (REQUIRED_MONTHS - 1), target, freq="M")
     previous_months = pd.period_range(target - BELOW_MONTHS, target - 1, freq="M")
+    volume_months = pd.period_range(target - VOLUME_MONTHS, target - 1, freq="M")
     info = meta.copy()
     if "ticker" not in info:
         raise ValueError("metadata requires ticker")
@@ -201,6 +241,7 @@ def scan_monthly_market(prices, meta, market, as_of, price_basis="adj"):
         "id": market, **MARKET_DISPLAY[market], "latest": _month_end(target),
         "targetMonth": str(target), "priorBelowStart": str(previous_months[0]),
         "priorBelowEnd": str(previous_months[-1]),
+        "volumeWindowStart": str(volume_months[0]), "volumeWindowEnd": str(volume_months[-1]),
         "lastTradingDate": max(target_days).date().isoformat() if target_days else None,
         "requested": len(info), "scanned": 0, "failed": 0, "noHistory": 0,
         "shortHistory": 0, "invalidData": 0, "gapped": 0, "stale": 0,
@@ -255,21 +296,28 @@ def scan_monthly_market(prices, meta, market, as_of, price_basis="adj"):
             current = monthly.loc[target]
             if prior["MA"].isna().any() or pd.isna(current["MA"]):
                 raise ValueError("SMA10 cannot be evaluated for all six prior months")
+            totals = monthly.loc[pd.period_range(volume_months[0], target, freq="M"), "Volume"]
+            if _numeric(totals, positive=False).isna().any():
+                raise ValueError("invalid Volume totals in target or preceding three months")
+            volume = float(current["Volume"])
+            previous_volumes = [float(monthly.loc[month, "Volume"]) for month in volume_months]
+            average_volume = sum(previous_volumes) / VOLUME_MONTHS
+            if not math.isfinite(average_volume):
+                raise ValueError("preceding three-month Volume average is not finite")
         except (KeyError, TypeError, ValueError) as exc:
             exclude(yahoo, "invalidData", str(exc))
             continue
         summary["scanned"] += 1
         if not ((prior["Close"] < prior["MA"]).all()
-                and current["Close"] > current["MA"]):
+                and current["Close"] > current["MA"] and volume > average_volume):
             continue
         prior_volume = _optional_volume(monthly.loc[target - 1, "Volume"])
-        volume = _optional_volume(current["Volume"])
-        ratio = (volume / prior_volume if volume is not None
-                 and prior_volume is not None and prior_volume > 0 else None)
+        ratio = volume / average_volume if average_volume > 0 else None
         if ratio is not None and not math.isfinite(ratio):
             ratio = None
         decimals = MARKET_DISPLAY[market]["decimals"]
         above = (float(current["Close"]) / float(current["MA"]) - 1) * 100
+        latest_date, latest_close, latest_signal_close = _latest_quote(prices[yahoo], as_of, price_basis)
         row = {
             "market": market, "date": _month_end(target), "target_month": str(target),
             "last_trading_date": current["LastTradingDate"], "ticker": record["ticker"],
@@ -277,20 +325,27 @@ def scan_monthly_market(prices, meta, market, as_of, price_basis="adj"):
             "close": round(float(current["RawClose"]), decimals),
             "signal_close": round(float(current["Close"]), 4),
             "ma10": round(float(current["MA"]), 4), "above_ma_%": round(above, 2),
-            "volume": volume, "previous_month_volume": prior_volume,
+            "volume": int(volume), "previous_month_volume": prior_volume,
+            "avg_volume_3m": round(average_volume, 4),
             "vol_ratio": round(ratio, 2) if ratio is not None else None,
+            "volume_window_start": str(volume_months[0]), "volume_window_end": str(volume_months[-1]),
             "prior_below_start": str(previous_months[0]),
             "prior_below_end": str(previous_months[-1]), "prior_below_months": BELOW_MONTHS,
             "last_close": round(float(current["RawClose"]), decimals),
             "last_signal_close": round(float(current["Close"]), 4),
             "last_above_ma_%": round(above, 2), "return_since_%": 0.0,
-            "bars_since": 0, "price_basis": price_basis, "_y": yahoo,
+            "bars_since": 0, "latest_date": latest_date,
+            "latest_close": round(latest_close, decimals) if latest_close is not None else None,
+            "latest_signal_close": round(latest_signal_close, 4) if latest_signal_close is not None else None,
+            "price_basis": price_basis, "_y": yahoo,
         }
         audit = [{"month": str(month), "close": round(float(prior.loc[month, "Close"]), 4),
                   "ma": round(float(prior.loc[month, "MA"]), 4), "below": True}
                  for month in previous_months]
         rows.append(row)
-        charts.append(_chart(monthly, row, audit, yahoo))
+        volume_audit = [{"month": str(month), "volume": int(value)}
+                        for month, value in zip(volume_months, previous_volumes)]
+        charts.append(_chart(monthly, row, audit, volume_audit, yahoo))
     summary["hits"] = len(rows)
     downloaded = len(info) - summary["failed"]
     summary["degraded"] = bool(downloaded and summary["gapped"] > downloaded * 0.2)
