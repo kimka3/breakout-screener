@@ -2,6 +2,7 @@
 report.html
 report.artifact.html
 breakouts*.csv
+monthly_breakouts*.csv
 
 # 캐시 (시세 pickle, 구성종목 CSV, 사내 CA 번들) — 29MB, 재생성 가능
 .cache/
