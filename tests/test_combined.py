@@ -26,6 +26,28 @@ def long_history():
 
 
 class CombinedTests(unittest.TestCase):
+    def test_monthly_output_allows_unavailable_volume_ratio(self):
+        frame = long_history()
+        frame.loc["2026-07-31", "Volume"] = float("nan")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = ["sp500_breakout.py", "--with-monthly", "--market", "sp500", "--tickers", "TEST",
+                    "--date", "2026-09-13", "--ma", "3", "--lookback", "1", "--no-hold",
+                    "--out", str(root / "d.csv"), "--monthly-out", str(root / "m.csv"),
+                    "--html", str(root / "r.html"), "--summary", str(root / "s.txt")]
+            with patch.object(sys, "argv", args), \
+                 patch.object(screener, "download_prices", return_value={"TEST": frame}), \
+                 patch.object(screener, "fetch_fundamentals", return_value={}), \
+                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self.assertEqual(screener.main(), 0)
+            monthly = report_payload(root / "r.html")["screens"][1]
+            self.assertFalse(monthly["volumeFilter"])
+            self.assertEqual(len(monthly["hits"]), 1)
+            self.assertIsNone(monthly["hits"][0]["volRatio"])
+            self.assertIsNone(monthly["hits"][0]["avgVol"])
+            self.assertEqual(len(pd.read_csv(root / "m.csv")), 1)
+            self.assertNotIn("전월 대비 거래량 2배", (root / "s.txt").read_text(encoding="utf-8"))
+
     def test_live_month_boundary_uses_each_markets_local_calendar(self):
         from zoneinfo import ZoneInfo
 
@@ -82,7 +104,8 @@ class CombinedTests(unittest.TestCase):
             self.assertEqual(day["maPeriod"], 3)
             self.assertEqual(day["volMult"], 99)
             self.assertEqual(month["maPeriod"], 10)
-            self.assertEqual(month["volMult"], 2)
+            self.assertIsNone(month["volMult"])
+            self.assertFalse(month["volumeFilter"])
             self.assertEqual(month["belowMonths"], 6)
             self.assertEqual(len(month["hits"]), 2)
             self.assertTrue(all(m["targetMonth"] == "2026-08" for m in month["markets"]))

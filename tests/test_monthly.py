@@ -43,7 +43,7 @@ class MonthlySignalTests(unittest.TestCase):
             with self.subTest(as_of=as_of):
                 self.assertEqual(str(monthly.last_completed_month(as_of)), expected)
 
-    def test_six_below_months_then_breakout_with_exactly_double_volume(self):
+    def test_six_below_months_then_breakout_retains_reference_volume(self):
         rows, charts, summary = self.scan(daily_history())
         self.assertEqual(summary["scanned"], 1)
         self.assertEqual(summary["hits"], 1)
@@ -82,10 +82,53 @@ class MonthlySignalTests(unittest.TestCase):
         self.assertEqual(summary["scanned"], 1)
         self.assertEqual(rows, [])
 
-    def test_volume_below_double_fails(self):
-        rows, _, summary = self.scan(daily_history(monthly_volumes=[100] * 15 + [199]))
+    def test_adbe_like_volume_decline_does_not_reject_a_price_breakout(self):
+        rows, charts, summary = self.scan(daily_history(
+            monthly_volumes=[100] * 14 + [127335100, 90134000]))
         self.assertEqual(summary["scanned"], 1)
-        self.assertEqual(rows, [])
+        self.assertEqual(summary["hits"], 1)
+        self.assertEqual(rows[0]["volume"], 90134000)
+        self.assertEqual(rows[0]["previous_month_volume"], 127335100)
+        self.assertAlmostEqual(rows[0]["volume"] / rows[0]["previous_month_volume"],
+                               0.7078488178043603)
+        self.assertEqual(rows[0]["vol_ratio"], 0.71)
+        self.assertEqual(charts[0]["volRatio"], 0.71)
+
+    def test_missing_or_unusable_volume_never_blocks_valid_price_signals(self):
+        for case, value in (("zero", 0.0), ("nan", float("nan")),
+                            ("infinity", float("inf")), ("negative", -1.0),
+                            ("missing column", None)):
+            with self.subTest(case=case):
+                frame = daily_history()
+                if case == "missing column":
+                    frame = frame.drop(columns="Volume")
+                else:
+                    frame["Volume"] = value
+                rows, charts, summary = self.scan(frame)
+                self.assertEqual(summary["scanned"], 1)
+                self.assertEqual(summary["hits"], 1)
+                self.assertEqual(summary["invalidData"], 0)
+                expected = 0 if case == "zero" else None
+                self.assertEqual(rows[0]["volume"], expected)
+                self.assertEqual(rows[0]["previous_month_volume"], expected)
+                self.assertIsNone(rows[0]["vol_ratio"])
+                self.assertEqual(charts[0]["volumes"], [expected] * 16)
+                json.dumps({"rows": rows, "charts": charts, "summary": summary}, allow_nan=False)
+
+    def test_partial_missing_reference_volume_does_not_become_a_valid_monthly_total(self):
+        for month in ("2026-07", "2026-08"):
+            with self.subTest(month=month):
+                frame = daily_history()
+                frame["Volume"] = frame["Volume"].astype(float)
+                missing_day = frame.index[frame.index.to_period("M") == pd.Period(month)][3]
+                frame.loc[missing_day, "Volume"] = float("nan")
+                rows, charts, summary = self.scan(frame)
+                self.assertEqual(summary["hits"], 1)
+                self.assertEqual(rows[0]["volume"], 200 if month == "2026-07" else None)
+                self.assertEqual(rows[0]["previous_month_volume"], 100 if month == "2026-08" else None)
+                self.assertIsNone(rows[0]["vol_ratio"])
+                self.assertIsNone(charts[0]["volumes"][-2 if month == "2026-07" else -1])
+                json.dumps({"rows": rows, "charts": charts}, allow_nan=False)
 
     def test_current_incomplete_month_is_ignored_and_no_present_day_hold_is_applied(self):
         frame = daily_history()
@@ -149,7 +192,7 @@ class MonthlySignalTests(unittest.TestCase):
         self.assertEqual(summary["stale"], 1)
         self.assertEqual(summary["lastTradingDate"], "2026-08-31")
 
-    def test_missing_session_in_each_volume_month_is_detected_from_peers(self):
+    def test_missing_price_sessions_in_recent_months_are_detected_from_peers(self):
         complete = daily_history()
         for month in ("2026-07", "2026-08"):
             with self.subTest(month=month):
@@ -160,8 +203,7 @@ class MonthlySignalTests(unittest.TestCase):
                 self.assertEqual(summary["stale"], 0)
 
     def test_bad_values_and_missing_adjusted_column_are_explicitly_excluded(self):
-        for column, value in (("Volume", float("nan")), ("Adj Close", float("inf")),
-                              ("Close", 0)):
+        for column, value in (("Adj Close", float("inf")), ("Close", 0)):
             with self.subTest(column=column):
                 frame = daily_history()
                 frame.loc[frame.index[-2], column] = value

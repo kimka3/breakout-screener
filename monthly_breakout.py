@@ -1,4 +1,4 @@
-"""Completed-month SMA10 breakout screening over already downloaded daily bars.
+"""Completed-month SMA10 price breakout screening over downloaded daily bars.
 
 This module performs no downloads, fundamental lookups, or file writes. The peer
 calendar can expose missing sessions seen in other supplied securities; it cannot
@@ -69,17 +69,27 @@ def _numeric(series, positive=True):
     return values.where(valid)
 
 
+def _optional_volume(value):
+    """Volume is reference data: preserve valid zeroes, serialize bad totals as null."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return int(number) if math.isfinite(number) and number >= 0 else None
+
+
 def aggregate_monthly_prices(frame, target_month, price_basis="adj"):
     """Adjust each DAILY OHLC first, then aggregate completed calendar months.
 
     Close is the selected signal basis; RawClose retains the provider Close.
     A missing observation never silently becomes a valid monthly extreme/total.
+    Volume is optional reference data and never determines signal eligibility.
     """
     if price_basis not in ("adj", "raw"):
         raise ValueError("price_basis must be adj or raw")
     target = pd.Period(target_month, freq="M")
     daily = _daily_frame(frame, target)
-    required = ["Open", "High", "Low", "Close", "Volume"]
+    required = ["Open", "High", "Low", "Close"]
     if price_basis == "adj":
         required.append("Adj Close")
     for column in required:
@@ -90,13 +100,15 @@ def aggregate_monthly_prices(frame, target_month, price_basis="adj"):
     raw_close = _numeric(daily["Close"])
     price = _numeric(daily["Adj Close"]) if price_basis == "adj" else raw_close
     factor = price / raw_close
+    volume = (_numeric(daily["Volume"], positive=False) if "Volume" in daily
+              else pd.Series(float("nan"), index=daily.index))
     values = pd.DataFrame({
         "Open": _numeric(daily["Open"]) * factor,
         "High": _numeric(daily["High"]) * factor,
         "Low": _numeric(daily["Low"]) * factor,
         "Close": price,
         "RawClose": raw_close,
-        "Volume": _numeric(daily["Volume"], positive=False),
+        "Volume": volume,
     }, index=daily.index)
     groups = values.groupby(values.index.to_period("M"))
     monthly = groups.agg({
@@ -134,8 +146,7 @@ def _chart(monthly, row, audit, yahoo):
         "dates": [_month_end(month) for month in window.index],
         "opens": clean("Open"), "highs": clean("High"), "lows": clean("Low"),
         "closes": clean("Close"), "mas": clean("MA"),
-        "volumes": [None if pd.isna(v) or not math.isfinite(float(v)) else int(v)
-                    for v in window["Volume"]],
+        "volumes": [_optional_volume(v) for v in window["Volume"]],
         "previousMonths": audit, "_y": yahoo,
     }
 
@@ -145,7 +156,9 @@ def scan_monthly_market(prices, meta, market, as_of, price_basis="adj"):
 
     Screening requires 16 consecutive completed calendar months. Every observed
     peer session within those 16 months must exist in the security's data; this
-    covers monthly endpoints and both months used in the volume comparison.
+    covers monthly endpoints and the OHLC bars shown in the chart. The target
+    close must exceed SMA10, and each of the preceding six closes must be strictly
+    below its own SMA10. Volume totals and ratios are optional display data.
     Bad securities are excluded, counted, and never replaced by an older signal.
     """
     if market not in MARKET_DISPLAY:
@@ -226,36 +239,35 @@ def scan_monthly_market(prices, meta, market, as_of, price_basis="adj"):
         try:
             # Check every input contributing to the predicate and its chart bars.
             relevant = daily.loc[daily.index.to_period("M") >= required_months[0]]
-            columns = ["Open", "High", "Low", "Close", "Volume"]
+            columns = ["Open", "High", "Low", "Close"]
             if price_basis == "adj":
                 columns.append("Adj Close")
             for column in columns:
                 if column not in relevant:
                     raise ValueError(f"{column} column is missing")
-                if _numeric(relevant[column], positive=column != "Volume").isna().any():
+                if _numeric(relevant[column]).isna().any():
                     raise ValueError(f"invalid {column} values in required months")
             monthly = aggregate_monthly_prices(daily, target, price_basis)
             required = monthly.reindex(required_months)
-            if required[["Open", "High", "Low", "Close", "RawClose", "Volume"]].isna().any().any():
+            if required[["Open", "High", "Low", "Close", "RawClose"]].isna().any().any():
                 raise ValueError("incomplete monthly bars")
             prior = monthly.loc[previous_months]
             current = monthly.loc[target]
             if prior["MA"].isna().any() or pd.isna(current["MA"]):
                 raise ValueError("SMA10 cannot be evaluated for all six prior months")
-            prior_volume = float(monthly.loc[target - 1, "Volume"])
-            volume = float(current["Volume"])
-            if not math.isfinite(prior_volume) or prior_volume <= 0 or not math.isfinite(volume):
-                raise ValueError("monthly volume comparison is not finite with a positive denominator")
-            ratio = volume / prior_volume
-            if not math.isfinite(ratio):
-                raise ValueError("monthly volume ratio is not finite")
         except (KeyError, TypeError, ValueError) as exc:
             exclude(yahoo, "invalidData", str(exc))
             continue
         summary["scanned"] += 1
         if not ((prior["Close"] < prior["MA"]).all()
-                and current["Close"] > current["MA"] and ratio >= 2.0):
+                and current["Close"] > current["MA"]):
             continue
+        prior_volume = _optional_volume(monthly.loc[target - 1, "Volume"])
+        volume = _optional_volume(current["Volume"])
+        ratio = (volume / prior_volume if volume is not None
+                 and prior_volume is not None and prior_volume > 0 else None)
+        if ratio is not None and not math.isfinite(ratio):
+            ratio = None
         decimals = MARKET_DISPLAY[market]["decimals"]
         above = (float(current["Close"]) / float(current["MA"]) - 1) * 100
         row = {
@@ -265,8 +277,9 @@ def scan_monthly_market(prices, meta, market, as_of, price_basis="adj"):
             "close": round(float(current["RawClose"]), decimals),
             "signal_close": round(float(current["Close"]), 4),
             "ma10": round(float(current["MA"]), 4), "above_ma_%": round(above, 2),
-            "volume": int(volume), "previous_month_volume": int(prior_volume),
-            "vol_ratio": round(ratio, 2), "prior_below_start": str(previous_months[0]),
+            "volume": volume, "previous_month_volume": prior_volume,
+            "vol_ratio": round(ratio, 2) if ratio is not None else None,
+            "prior_below_start": str(previous_months[0]),
             "prior_below_end": str(previous_months[-1]), "prior_below_months": BELOW_MONTHS,
             "last_close": round(float(current["RawClose"]), decimals),
             "last_signal_close": round(float(current["Close"]), 4),

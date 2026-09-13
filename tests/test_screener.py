@@ -322,6 +322,15 @@ class MainTests(unittest.TestCase):
 
 
 class CacheTests(unittest.TestCase):
+    def test_downloader_preserves_price_rows_with_missing_volume(self):
+        frame = price_frame([10, 10, 10, 12], [100, 100, 100, float("nan")])
+        with patch.object(screener.yf, "download", return_value=pd.concat({"TEST": frame}, axis=1)), \
+             redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            prices = screener.download_prices(["TEST"], date(2026, 1, 1), date(2026, 1, 30), use_cache=False)
+        pd.testing.assert_frame_equal(prices["TEST"], frame)
+        # The original daily volume filter still rejects an unevaluable breakout.
+        self.assertTrue(screener.find_signals(prices["TEST"], 3, 2, 2, "adj").empty)
+
     def test_cache_hit_reconstructs_failed_tickers_without_downloading(self):
         frame = price_frame([10] * 10)
         missing = frame.iloc[:0]
