@@ -295,6 +295,23 @@ class MainTests(unittest.TestCase):
         for path in (self.html, self.html.with_suffix(".artifact.html")):
             self.assertNotIn("</script><script>", path.read_text(encoding="utf-8"))
 
+    def test_report_loads_public_rim_summary_without_credentials(self):
+        frame = price_frame([10, 10, 10, 12], [100, 100, 100, 200])
+        hit = screener.find_signals(frame, 3, 2, 2, "raw").iloc[0]
+        args = SimpleNamespace(ma=3, vol_window=2, vol_mult=2, lookback=1,
+                               price_basis="raw", no_hold=False, date=None,
+                               fundamentals_as_of="2026-09-16 08:00 KST")
+        chart = screener.build_series(
+            frame, hit, args, "005930", "삼성전자", "", "kospi200")
+        with redirect_stdout(io.StringIO()):
+            screener.write_html([chart], args, [{"id": "kospi200"}], self.html)
+        report = self.html.read_text(encoding="utf-8")
+        self.assertIn("https://rim-lab-korea.onrender.com/api/public/rim", report)
+        self.assertIn("RIM 적정가", report)
+        self.assertIn("RIM 상승여력", report)
+        self.assertIn("void loadPublicRim()", report)
+        self.assertNotIn("Authorization: Basic", report)
+
     def test_nonpositive_or_nonfinite_numeric_options_are_rejected_before_download(self):
         for option, value in (("--ma", "0"), ("--ma", "-1"),
                               ("--vol-window", "0"), ("--lookback", "0"),

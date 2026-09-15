@@ -427,6 +427,28 @@ h1 {
 .raw-price, .table-date { display: block; color: var(--ink-3); font-size: 10px; font-weight: 400; }
 .raw-price { margin-top: 2px; }
 
+/* 공개 RIM 요약 — 국내 돌파 종목만 표시 */
+.rim-box {
+  margin-top: 12px;
+  padding: 11px 12px;
+  border: 1px solid color-mix(in srgb, var(--latest) 32%, var(--rule-soft));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--latest) 6%, var(--surface));
+}
+.rim-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.rim-head strong { font-size: 12px; font-weight: 650; color: var(--ink); }
+.rim-head span { color: var(--ink-3); font: 10px var(--font-mono); text-align: right; }
+.rim-values { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 8px; margin-top: 8px; }
+.rim-value { min-width: 0; }
+.rim-value small { display: block; color: var(--ink-3); font-size: 9.5px; }
+.rim-value b { display: block; margin-top: 1px; font: 650 14px/1.3 var(--font-mono); font-variant-numeric: tabular-nums; }
+.rim-value b.up { color: var(--confirm); }
+.rim-value b.down { color: var(--down); }
+.rim-foot { display: flex; flex-wrap: wrap; gap: 5px 9px; margin-top: 7px; color: var(--ink-3); font-size: 9.5px; }
+.rim-flag { padding: 2px 5px; border-radius: 999px; color: var(--accent); background: var(--accent-soft); }
+.rim-pending, .rim-error { color: var(--ink-3); font-size: 11px; }
+.rim-error { color: var(--down); }
+
 /* chart */
 .chart-head {
   display: flex;
@@ -603,6 +625,7 @@ footer code {
       <li id="reading-chart"></li>
       <li id="reading-basis"></li>
       <li><b>PER</b>은 최근 12개월 실적 기준(trailing), <b>선행 PER</b>은 애널리스트 예상 실적 기준입니다. 최근 12개월이 적자면 trailing PER 이 성립하지 않아 <b>적자</b>로 표시되며, 이때는 선행 PER 만 참고할 수 있습니다. <b>국내 종목(KOSPI 200·KOSDAQ 150)은 데이터 제공처에 후행 PER 이 없어 대부분 선행 PER 만 표시됩니다.</b></li>
+      <li><b>RIM 적정가</b>는 국내 돌파 종목에만 표시합니다. RIM Lab의 동일 전망에 초과이익 지속계수(ω) 0.60·0.75·0.95를 각각 적용한 주당가치 중 최솟값이며, 상승여력은 RIM 조회 시점 현재가를 기준으로 계산합니다. 돌파 판정 가격과 조회시점이 다를 수 있습니다.</li>
     </ul>
     <h2>실행 예시</h2>
     <p><code id="run-command">python sp500_breakout.py --lookback 20 --html</code></p>
@@ -641,6 +664,7 @@ const nf = (v, d = 2) => Number.isFinite(v) ? v.toLocaleString("en-US", { minimu
 const signedPct = (v) => Number.isFinite(v) ? (v >= 0 ? "+" : "") + nf(v) + "%" : "—";
 const vol = (v) => !Number.isFinite(v) ? "—" : v >= 1e6 ? (v / 1e6).toFixed(1) + "M" : v >= 1e3 ? Math.round(v / 1e3) + "K" : String(v);
 const md = (s) => typeof s === "string" ? s.slice(5).replace("-", "/") : "—";
+const RIM_API = "https://rim-lab-korea.onrender.com/api/public/rim";
 
 /* 시장마다 통화 단위가 다르다 — 원화는 소수점 없이, 달러는 두 자리 */
 let MK = Object.fromEntries(SCREEN.markets.map(m => [m.id, m]));
@@ -728,6 +752,106 @@ function configureScreen() {
   historical.hidden = !SCREEN.historicalAsOf;
   historical.textContent = SCREEN.historicalAsOf
     ? "과거 가격 기준일 " + SCREEN.historicalAsOf + ": 구성종목과 PER·EPS는 실행 시점의 자료입니다. 해당 과거 시점의 구성종목·재무지표를 재현한 보고서는 아닙니다." : "";
+}
+
+const rimEligible = (h) => h.market !== "sp500" && /^\d{6}$/.test(String(h.ticker || ""));
+const rimWon = (value) => Number.isFinite(value) ? nf(Math.round(value), 0) + "원" : "—";
+const rimDateFormatter = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit" });
+const rimDate = (value) => {
+  const parsed = typeof value === "string" ? new Date(value) : null;
+  return parsed && Number.isFinite(parsed.getTime()) ? rimDateFormatter.format(parsed) : "시점 미상";
+};
+
+function rimHTML(h) {
+  if (!rimEligible(h)) return "";
+  const rim = h.rim;
+  if (!rim || rim.status === "loading") {
+    return `<section class="rim-box"><div class="rim-head"><strong>RIM 적정가</strong><span>ω 0.60·0.75·0.95 최솟값</span></div><p class="rim-pending">RIM Lab에서 계산 중…</p></section>`;
+  }
+  if (rim.status !== "ready") {
+    return `<section class="rim-box"><div class="rim-head"><strong>RIM 적정가</strong><span>ω 0.60·0.75·0.95 최솟값</span></div><p class="rim-error">현재 RIM 값을 불러오지 못했습니다.</p></section>`;
+  }
+  const value = rim.payload.valuation;
+  const quality = rim.payload.quality || {};
+  const asOf = rim.payload.asOf || {};
+  const upsideClass = value.upsidePct >= 0 ? "up" : "down";
+  const flags = [
+    quality.consensusOutliersAccepted ? '<span class="rim-flag">컨센서스 이상치 포함</span>' : "",
+    Array.isArray(quality.inflationFallbackYears) && quality.inflationFallbackYears.length
+      ? `<span class="rim-flag">물가가정 ${quality.inflationFallbackYears.map(esc).join("·")}년</span>` : "",
+  ].filter(Boolean).join("");
+  return `<section class="rim-box">
+    <div class="rim-head"><strong>RIM 적정가</strong><span>ω ${nf(value.selectedOmega, 2)} · 3개 시나리오 최솟값</span></div>
+    <div class="rim-values">
+      <div class="rim-value"><small>보수적 적정가</small><b>${rimWon(value.intrinsicValuePerShare)}</b></div>
+      <div class="rim-value"><small>RIM 현재가</small><b>${rimWon(value.currentPrice)}</b></div>
+      <div class="rim-value"><small>상승여력</small><b class="${upsideClass}">${signedPct(value.upsidePct)}</b></div>
+    </div>
+    <div class="rim-foot"><span>현재가 ${esc(rimDate(asOf.price))} · 계산 ${esc(rimDate(asOf.calculatedAt))}</span>${flags}</div>
+  </section>`;
+}
+
+function rimTableCells(h) {
+  if (!rimEligible(h)) return '<td>—</td><td>—</td>';
+  const rim = h.rim;
+  if (!rim || rim.status === "loading") return '<td>계산 중…</td><td>—</td>';
+  if (rim.status !== "ready") return '<td class="down">조회 실패</td><td>—</td>';
+  const value = rim.payload.valuation;
+  return `<td>${rimWon(value.intrinsicValuePerShare)}<small class="table-date">현재가 ${rimWon(value.currentPrice)} · ω ${nf(value.selectedOmega, 2)}</small></td>`
+    + `<td class="${value.upsidePct >= 0 ? "up" : "down"}">${signedPct(value.upsidePct)}</td>`;
+}
+
+function normalizeRimPayload(payload, code) {
+  const value = payload?.valuation;
+  if (payload?.schemaVersion !== 1 || payload?.company?.code !== code || ![
+    value?.currentPrice, value?.intrinsicValuePerShare, value?.upsidePct, value?.selectedOmega,
+  ].every(Number.isFinite)) throw new Error("invalid RIM response");
+  return { status: "ready", payload };
+}
+
+let rimRenderTimer = null;
+function scheduleRimRender() {
+  clearTimeout(rimRenderTimer);
+  rimRenderTimer = setTimeout(render, 80);
+}
+
+async function loadPublicRim() {
+  const byCode = new Map();
+  for (const screen of SCREENS) {
+    for (const hit of screen.hits) {
+      if (!rimEligible(hit)) continue;
+      if (hit.rim?.status === "ready") continue;
+      const code = String(hit.ticker);
+      hit.rim = { status: "loading" };
+      if (!byCode.has(code)) byCode.set(code, []);
+      byCode.get(code).push(hit);
+    }
+  }
+  const entries = [...byCode.entries()];
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < entries.length) {
+      const [code, hits] = entries[cursor++];
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 90_000);
+      let result;
+      try {
+        const response = await fetch(`${RIM_API}?code=${encodeURIComponent(code)}`, {
+          headers: { accept: "application/json" }, signal: controller.signal,
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body?.error?.code || "RIM request failed");
+        result = normalizeRimPayload(body, code);
+      } catch {
+        result = { status: "error" };
+      } finally {
+        clearTimeout(timer);
+      }
+      hits.forEach(hit => { hit.rim = result; });
+      scheduleRimRender();
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(3, entries.length) }, worker));
 }
 /* ---------- 시장 선택 ---------- */
 const marketRow = document.getElementById("market-row");
@@ -903,6 +1027,7 @@ function monthlyCard(h, id) {
       <div class="cell stack"><div class="v ${returnClass}">${signedPct(h.retPct)}</div><small class="raw-price">월말 실제 종가 대비</small></div>
     </div>
     ${h.lastTradingDate ? `<p class="monthly-note">판정 월 마지막 거래일 ${esc(h.lastTradingDate)}</p>` : ""}
+    ${rimHTML(h)}
     ${auditHTML(h)}
     ${volumeAuditHTML(h)}
     <div class="chart-head"><div class="legend">
@@ -960,6 +1085,8 @@ function card(h, id) {
     <div class="cell"><div class="v ${h.lastPct >= 0 ? "up" : "down"}">${h.lastPct >= 0 ? "+" : ""}${nf(h.lastPct)}%</div></div>
   </div>
 
+  ${rimHTML(h)}
+
   <div class="chart-head">
     <div class="legend">
       <span><i class="swatch up"></i>상승</span>
@@ -988,9 +1115,10 @@ function readoutHTML(h, i, isSignal) {
 /* ---------- table ---------- */
 function table(hits) {
   if (isMonthly()) return `<div class="tablewrap"><table>
-    <thead><tr><th>판정 월</th><th>티커</th><th>월말 가격 / 마지막 거래일</th><th>현재가 / 날짜</th><th>월말 대비 수익률</th><th>${esc(maLabel())}</th><th>이격</th><th>월 총거래량</th><th>직전 ${esc(monthlyVolumeWindow())}개월 평균</th><th>평균 대비</th><th>거래량 확인</th><th>직전 ${esc(SCREEN.belowMonths || 6)}개월</th><th>PER</th><th>선행 PER</th></tr></thead>
+    <thead><tr><th>판정 월</th><th>티커</th><th>RIM 적정가 / 기준가</th><th>RIM 상승여력</th><th>월말 가격 / 마지막 거래일</th><th>현재가 / 날짜</th><th>월말 대비 수익률</th><th>${esc(maLabel())}</th><th>이격</th><th>월 총거래량</th><th>직전 ${esc(monthlyVolumeWindow())}개월 평균</th><th>평균 대비</th><th>거래량 확인</th><th>직전 ${esc(SCREEN.belowMonths || 6)}개월</th><th>PER</th><th>선행 PER</th></tr></thead>
     <tbody>${hits.map(h => `<tr>
       <td>${esc(dateLabel(h.date))}</td><td class="sym">${esc(h.ticker)}</td>
+      ${rimTableCells(h)}
       <td>${px(signalClose(h), h)}<small class="table-date">${priceLabel(h)}${h.lastTradingDate ? " · " + esc(h.lastTradingDate) : ""}</small>${rawPriceHTML(signalClose(h), h.close, h)}</td>
       <td>${latestCloseHTML(h)}</td>
       <td class="${Number.isFinite(h.retPct) ? (h.retPct >= 0 ? "up" : "down") : ""}">${signedPct(h.retPct)}<small class="table-date">실제 종가 기준</small></td>
@@ -1003,13 +1131,14 @@ function table(hits) {
     </tr>`).join("")}</tbody></table></div>`;
   return `<div class="tablewrap"><table>
   <thead><tr>
-    <th>돌파일</th><th>티커</th><th>돌파 가격</th><th>배수</th>
+    <th>돌파일</th><th>티커</th><th>RIM 적정가 / 기준가</th><th>RIM 상승여력</th><th>돌파 가격</th><th>배수</th>
     <th>현재 가격 / 거래일</th><th>실제 종가 대비</th><th>MA${esc(SCREEN.maPeriod)}</th><th>현재 이격</th><th>경과</th>
     <th>PER</th><th>선행 PER</th>
   </tr></thead>
   <tbody>${hits.map(h => `<tr>
     <td style="font-size:12px;color:var(--ink-3)">${esc(h.date)}</td>
     <td class="sym">${esc(h.ticker)}</td>
+    ${rimTableCells(h)}
     <td>${px(signalClose(h), h)}<small class="table-date">${priceLabel(h)}</small>${rawPriceHTML(signalClose(h), h.close, h)}</td>
     <td class="hot">${nf(h.volRatio)}x</td>
     <td>${px(lastSignalClose(h), h)}<small class="table-date">${esc(h.dates[h.dates.length - 1])}</small>${rawPriceHTML(lastSignalClose(h), h.lastClose, h)}</td>
@@ -1153,4 +1282,5 @@ screenRow.querySelectorAll(".screen-tab").forEach((btn, i) => {
   });
 });
 selectScreen(SCREEN.id);
+void loadPublicRim();
 </script>
