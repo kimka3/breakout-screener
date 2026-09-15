@@ -1,5 +1,5 @@
 """
-S&P 500 120일 이동평균선 돌파 + 거래량 급증 스크리너
+S&P 500·KOSPI 200·KOSDAQ 150 이동평균선 돌파 스크리너
 
 조건
   1) 종가가 120일 이동평균선을 상향 돌파 (전일: 종가 <= MA120, 당일: 종가 > MA120)
@@ -149,6 +149,8 @@ def load_sp500(refresh: bool = False) -> pd.DataFrame:
 
 KOSPI200_CSV = CACHE_DIR / "kospi200_constituents.csv"
 NAVER_KPI200 = "https://finance.naver.com/sise/entryJongmok.naver?&page={page}&type=KPI200"
+KOSDAQ150_CSV = CACHE_DIR / "kosdaq150_constituents.csv"
+KODEX_KOSDAQ150 = "https://www.samsungfund.com/api/v1/kodex/product/2ETF54.do"
 
 
 def load_kospi200(refresh: bool = False) -> pd.DataFrame:
@@ -210,6 +212,86 @@ def load_kospi200(refresh: bool = False) -> pd.DataFrame:
         raise SystemExit(f"코스피200 구성종목을 가져오지 못했습니다: {exc}")
 
 
+def _validate_kosdaq150(df: pd.DataFrame) -> pd.DataFrame:
+    """KODEX PDF가 현금이나 일부 종목만 담긴 응답이면 사용하지 않는다."""
+    import re
+
+    required = {"ticker", "name", "sector"}
+    if not required.issubset(df.columns):
+        raise ValueError("필수 열이 없습니다")
+    checked = df.copy()
+    checked["ticker"] = checked["ticker"].astype(str).str.strip().str.upper()
+    checked["name"] = checked["name"].fillna("").astype(str).str.strip()
+    valid_codes = checked["ticker"].map(lambda code: re.fullmatch(r"[A-Z0-9]{6}", code) is not None)
+    if len(checked) != 150 or checked["ticker"].nunique() != 150 or not valid_codes.all():
+        raise ValueError(f"주식 종목 수가 150개가 아닙니다: {len(checked)}")
+    if (checked["name"] == "").any():
+        raise ValueError("종목명이 비어 있습니다")
+    return checked
+
+
+def load_kosdaq150(refresh: bool = False) -> pd.DataFrame:
+    """KODEX 코스닥150의 공개 PDF 구성내역에서 종목 코드와 이름을 받는다.
+
+    KRX 구성종목 API는 로그인 세션이 필요해 무인 GitHub Actions에 맞지 않는다.
+    KODEX 2ETF54 응답은 현금 행을 제외하면 코스닥150 주식 150개를 제공한다.
+    """
+    if not refresh:
+        cached = _read_cached_csv(KOSDAQ150_CSV, dtype={"ticker": str})
+        if cached is not None:
+            try:
+                return _validate_kosdaq150(cached)
+            except ValueError as exc:
+                print(f"[warn] 코스닥150 캐시가 유효하지 않아 새로 받습니다: {exc}", file=sys.stderr)
+
+    try:
+        import re
+
+        payload = json.loads(_http_get(KODEX_KOSDAQ150))
+        product = payload.get("info", {}).get("product", {})
+        pdf = payload.get("pdf", {})
+        holdings = pdf.get("list")
+        product_name = (str(product.get("fNm") or "") + " "
+                        + str(product.get("bmIdx") or "")).replace(" ", "")
+        basis_date = str(pdf.get("gijunYMD") or "")
+        if (product.get("fId") != "2ETF54" or "코스닥150" not in product_name
+                or re.fullmatch(r"\d{8}", basis_date) is None or not isinstance(holdings, list)):
+            raise RuntimeError("예상한 KODEX 코스닥150 응답이 아닙니다")
+        for count_field in ("totalCnt", "nowCnt"):
+            try:
+                if int(pdf[count_field]) != len(holdings):
+                    raise RuntimeError("KODEX 구성내역 응답이 일부만 내려왔습니다")
+            except (KeyError, TypeError, ValueError):
+                raise RuntimeError("KODEX 구성내역 전체 건수를 확인할 수 없습니다") from None
+
+        found = {}
+        for holding in holdings:
+            if not isinstance(holding, dict):
+                continue
+            code = str(holding.get("itmNo") or "").strip().upper()
+            name = str(holding.get("secNm") or "").strip()
+            if re.fullmatch(r"[A-Z0-9]{6}", code) and name:
+                found.setdefault(code, name)
+
+        df = pd.DataFrame({"ticker": list(found), "name": list(found.values())})
+        df["sector"] = ""
+        df = _validate_kosdaq150(df)
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        df.to_csv(KOSDAQ150_CSV, index=False, encoding="utf-8")
+        return df
+    except Exception as exc:
+        cached = _read_cached_csv(
+            KOSDAQ150_CSV, max_age_days=float("inf"), dtype={"ticker": str})
+        if cached is not None:
+            try:
+                cached = _validate_kosdaq150(cached)
+                print(f"[warn] 코스닥150 목록 갱신 실패({exc}). 캐시를 사용합니다.", file=sys.stderr)
+                return cached
+            except ValueError:
+                pass
+        raise SystemExit(f"코스닥150 구성종목을 가져오지 못했습니다: {exc}")
+
+
 # --------------------------------------------------------------------------
 # 시장 정의 — 통화·거래시간·표기 단위가 다르므로 시장별로 따로 다룬다
 # --------------------------------------------------------------------------
@@ -231,6 +313,15 @@ MARKETS = {
         "close": (15, 30),
         "loader": load_kospi200,
         "to_yahoo": lambda t: f"{str(t).zfill(6)}.KS",
+    },
+    "kosdaq150": {
+        "label": "KOSDAQ 150",
+        "currency": "KRW",
+        "decimals": 0,
+        "tz": "Asia/Seoul",
+        "close": (15, 30),
+        "loader": load_kosdaq150,
+        "to_yahoo": lambda t: f"{str(t).zfill(6)}.KQ",
     },
 }
 
@@ -656,7 +747,7 @@ def result_columns(args):
 
 def main() -> int:
     p = argparse.ArgumentParser(
-        description="S&P 500 120일선 상향돌파 + 거래량 급증 스크리너",
+        description="S&P 500·KOSPI 200·KOSDAQ 150 이동평균선 돌파 스크리너",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--ma", type=int, default=120, help="이동평균 기간(거래일)")
@@ -666,7 +757,7 @@ def main() -> int:
     p.add_argument("--date", default=None, help="기준일 YYYY-MM-DD (미지정시 최신 거래일)")
     p.add_argument("--price-basis", choices=["adj", "raw"], default="adj",
                    help="신호 계산 기준가: adj=수정주가(배당/분할 반영), raw=종가 그대로")
-    p.add_argument("--market", choices=["all", "sp500", "kospi200"], default="all",
+    p.add_argument("--market", choices=["all", *MARKETS], default="all",
                    help="스캔할 시장")
     p.add_argument("--with-monthly", action="store_true",
                    help="마지막 마감 월봉의 10개월선 장기 돌파를 함께 검사")
@@ -692,7 +783,7 @@ def main() -> int:
         p.error("--vol-mult는 유한한 양수여야 합니다")
     if args.tickers is not None:
         if args.market == "all":
-            p.error("--tickers에는 --market sp500 또는 --market kospi200을 지정하세요")
+            p.error("--tickers에는 --market sp500, kospi200 또는 kosdaq150을 지정하세요")
         tickers = list(dict.fromkeys(t.strip().upper() for t in args.tickers.split(",") if t.strip()))
         if not tickers:
             p.error("--tickers에 하나 이상의 티커를 입력하세요")

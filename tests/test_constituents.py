@@ -1,6 +1,7 @@
 """Offline coverage regressions for the primary constituent source parser."""
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import sys
@@ -26,6 +27,25 @@ def source_page(rows, last_page=None):
     return f"<html><body><table>{body}</table><table>{pagination}</table></body></html>"
 
 
+def kosdaq150_source(stock_count=150, *, duplicate=False, product_id="2ETF54"):
+    stocks = [{"itmNo": f"{i:06d}", "secNm": f"코스닥 종목 {i}"}
+              for i in range(1, stock_count + 1)]
+    if stocks:
+        stocks[0] = {"itmNo": "0126Z0", "secNm": "영문코드 종목"}
+    if duplicate and len(stocks) > 1:
+        stocks[-1] = dict(stocks[0])
+    holdings = [{"itmNo": "KRD010010001", "secNm": "원화예금"}, *stocks]
+    return json.dumps({
+        "info": {"product": {
+            "fId": product_id, "fNm": "KODEX 코스닥 150", "bmIdx": "코스닥 150 지수",
+        }},
+        "pdf": {
+            "gijunYMD": "20260915", "totalCnt": str(len(holdings)),
+            "nowCnt": str(len(holdings)), "list": holdings,
+        },
+    }, ensure_ascii=False)
+
+
 class ConstituentTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="constituents-regression-")
@@ -33,11 +53,15 @@ class ConstituentTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.legacy = self.root / "kospi200_constituents.csv"
         self.cache = self.root / "kospi200_constituents_v2.csv"
+        self.kosdaq_cache = self.root / "kosdaq150_constituents.csv"
         self.patch_cache = patch.object(screener, "CACHE_DIR", self.root)
         self.patch_path = patch.object(screener, "KOSPI200_CSV", self.legacy)
+        self.patch_kosdaq_path = patch.object(screener, "KOSDAQ150_CSV", self.kosdaq_cache)
         self.patch_cache.start()
         self.patch_path.start()
+        self.patch_kosdaq_path.start()
         self.addCleanup(self.patch_path.stop)
+        self.addCleanup(self.patch_kosdaq_path.stop)
         self.addCleanup(self.patch_cache.stop)
 
     def test_alphanumeric_codes_keep_their_own_names_and_following_rows(self):
@@ -81,6 +105,44 @@ class ConstituentTests(unittest.TestCase):
         with patch.object(screener, "_http_get", side_effect=RuntimeError("network unavailable")):
             result = screener.load_kospi200(refresh=True)
         self.assertEqual(result["ticker"].tolist(), ["0126Z0"])
+
+    def test_kosdaq150_uses_all_150_stock_rows_and_excludes_cash(self):
+        with patch.object(screener, "_http_get", return_value=kosdaq150_source()) as fetch:
+            result = screener.load_kosdaq150(refresh=True)
+        self.assertEqual(len(result), 150)
+        self.assertEqual(result.iloc[0]["ticker"], "0126Z0")
+        self.assertEqual(result.iloc[0]["name"], "영문코드 종목")
+        self.assertNotIn("KRD010010001", result["ticker"].tolist())
+        self.assertEqual(result["ticker"].nunique(), 150)
+        self.assertEqual(screener.MARKETS["kosdaq150"]["to_yahoo"]("0126Z0"), "0126Z0.KQ")
+        self.assertTrue(self.kosdaq_cache.exists())
+        with patch.object(screener, "_http_get") as cached_fetch:
+            cached = screener.load_kosdaq150()
+        self.assertEqual(cached["ticker"].tolist(), result["ticker"].tolist())
+        cached_fetch.assert_not_called()
+        fetch.assert_called_once_with(screener.KODEX_KOSDAQ150)
+
+    def test_kosdaq150_partial_or_duplicate_response_is_not_cached(self):
+        for body in (kosdaq150_source(149), kosdaq150_source(150, duplicate=True),
+                     kosdaq150_source(product_id="WRONG")):
+            with self.subTest(body=body[:80]):
+                self.kosdaq_cache.unlink(missing_ok=True)
+                with patch.object(screener, "_http_get", return_value=body), \
+                     self.assertRaises(SystemExit):
+                    screener.load_kosdaq150(refresh=True)
+                self.assertFalse(self.kosdaq_cache.exists())
+
+    def test_kosdaq150_refresh_failure_uses_only_a_valid_stale_cache(self):
+        valid = pd.DataFrame({
+            "ticker": ["0126Z0", *[f"{i:06d}" for i in range(2, 151)]],
+            "name": ["영문코드 종목", *[f"코스닥 종목 {i}" for i in range(2, 151)]],
+            "sector": [""] * 150,
+        })
+        valid.to_csv(self.kosdaq_cache, index=False)
+        with patch.object(screener, "_http_get", side_effect=RuntimeError("network unavailable")):
+            result = screener.load_kosdaq150(refresh=True)
+        self.assertEqual(len(result), 150)
+        self.assertEqual(result.iloc[0]["ticker"], "0126Z0")
 
 
 if __name__ == "__main__":

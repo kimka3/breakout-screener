@@ -65,6 +65,7 @@ class MonthlySignalTests(unittest.TestCase):
         self.assertEqual(row["latest_date"], "2026-08-31")
         self.assertEqual(row["latest_close"], 110)
         self.assertEqual(row["latest_signal_close"], 110)
+        self.assertEqual(chart["retPct"], 0)
         self.assertEqual(chart["sigIndex"], len(chart["dates"]) - 1)
         self.assertEqual(chart["dates"][-1], row["date"])
         audit = chart["previousMonths"]
@@ -178,6 +179,9 @@ class MonthlySignalTests(unittest.TestCase):
         self.assertEqual(charts[0]["lastSignalClose"], 110)
         self.assertEqual(charts[0]["latestDate"], "2026-09-01")
         self.assertEqual(charts[0]["latestSignalClose"], 1)
+        self.assertEqual(rows[0]["latest_close"], 1)
+        self.assertEqual(rows[0]["return_since_%"], -99.09)
+        self.assertEqual(charts[0]["retPct"], -99.09)
 
     def test_latest_daily_quote_is_separate_from_monthly_signal_and_clamped_to_as_of(self):
         for basis in ("adj", "raw"):
@@ -201,11 +205,13 @@ class MonthlySignalTests(unittest.TestCase):
                 self.assertEqual(row["latest_date"], "2026-09-11")
                 self.assertEqual(row["latest_close"], 80)
                 self.assertEqual(row["latest_signal_close"], latest_signal)
+                self.assertEqual(row["return_since_%"], -27.27)
                 self.assertEqual(chart["dates"][-1], "2026-08-31")
                 self.assertEqual(chart["closes"][-1], target_signal)
                 self.assertEqual(chart["latestDate"], row["latest_date"])
                 self.assertEqual(chart["latestClose"], 80)
                 self.assertEqual(chart["latestSignalClose"], latest_signal)
+                self.assertEqual(chart["retPct"], -27.27)
 
     def test_invalid_newest_quote_does_not_fall_back_or_change_completed_month_signal(self):
         for column, value in (("Close", 0), ("Adj Close", float("nan")),
@@ -221,10 +227,21 @@ class MonthlySignalTests(unittest.TestCase):
                 self.assertEqual(rows[0]["latest_date"], "2026-09-11")
                 self.assertIsNone(rows[0]["latest_close"])
                 self.assertIsNone(rows[0]["latest_signal_close"])
+                self.assertIsNone(rows[0]["return_since_%"])
                 self.assertEqual(charts[0]["latestDate"], "2026-09-11")
                 self.assertIsNone(charts[0]["latestClose"])
                 self.assertIsNone(charts[0]["latestSignalClose"])
+                self.assertIsNone(charts[0]["retPct"])
                 json.dumps({"rows": rows, "charts": charts}, allow_nan=False)
+
+    def test_kosdaq150_metadata_without_yahoo_uses_kq_suffix(self):
+        meta = pd.DataFrame({"ticker": ["0126Z0"], "name": ["영문코드"], "sector": [""]})
+        rows, charts, summary = monthly.scan_monthly_market(
+            {"0126Z0.KQ": daily_history()}, meta, "kosdaq150", "2026-09-13")
+        self.assertEqual(summary["label"], "KOSDAQ 150")
+        self.assertEqual(summary["hits"], 1)
+        self.assertEqual(rows[0]["ticker"], "0126Z0")
+        self.assertEqual(charts[0]["market"], "kosdaq150")
 
     def test_fifteen_months_are_insufficient_to_evaluate_all_six_prior_smas(self):
         frame = daily_history()

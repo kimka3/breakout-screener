@@ -68,14 +68,17 @@ class CombinedTests(unittest.TestCase):
                  patch.object(screener, "datetime", wraps=datetime) as clock, \
                  patch.dict(screener.MARKETS["sp500"], {"loader": lambda refresh: meta("TEST")}), \
                  patch.dict(screener.MARKETS["kospi200"], {"loader": lambda refresh: meta("005930")}), \
-                 patch.object(screener, "download_prices", side_effect=[{"TEST": frame}, {"005930.KS": frame}]), \
+                 patch.dict(screener.MARKETS["kosdaq150"], {"loader": lambda refresh: meta("196170")}), \
+                 patch.object(screener, "download_prices", side_effect=[
+                     {"TEST": frame}, {"005930.KS": frame}, {"196170.KQ": frame}]), \
                  patch.object(screener, "fetch_fundamentals", return_value={}), \
                  redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 clock.now.side_effect = lambda tz=None: instant.astimezone(tz)
                 self.assertEqual(screener.main(), 0)
             monthly = report_payload(root / "r.html")["screens"][1]
             self.assertEqual({m["id"]: m["targetMonth"] for m in monthly["markets"]},
-                             {"sp500": "2026-07", "kospi200": "2026-08"})
+                             {"sp500": "2026-07", "kospi200": "2026-08",
+                              "kosdaq150": "2026-08"})
 
     def test_monthly_hits_survive_empty_daily_results_and_independent_daily_options(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -89,17 +92,19 @@ class CombinedTests(unittest.TestCase):
             with patch.object(sys, "argv", args), \
                  patch.dict(screener.MARKETS["sp500"], {"loader": lambda refresh: meta("TEST")}), \
                  patch.dict(screener.MARKETS["kospi200"], {"loader": lambda refresh: meta("005930")}), \
+                 patch.dict(screener.MARKETS["kosdaq150"], {"loader": lambda refresh: meta("196170")}), \
                  patch.object(screener, "download_prices", side_effect=[{"TEST": long_history()},
-                                                                       {"005930.KS": long_history()}]) as download, \
+                                                                       {"005930.KS": long_history()},
+                                                                       {"196170.KQ": long_history()}]) as download, \
                  patch.object(screener, "fetch_fundamentals", return_value={}) as funda, \
                  redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 self.assertEqual(screener.main(), 0)
-            self.assertEqual(download.call_count, 2)  # Each market is downloaded once for both strategies.
-            self.assertEqual(funda.call_args.args[0], ["005930.KS", "TEST"])
+            self.assertEqual(download.call_count, 3)  # Each market is downloaded once for both strategies.
+            self.assertEqual(funda.call_args.args[0], ["005930.KS", "196170.KQ", "TEST"])
             self.assertTrue(pd.read_csv(root / "daily.csv").empty)
             monthly = pd.read_csv(root / "monthly.csv")
-            self.assertEqual(len(monthly), 2)
-            self.assertEqual(set(monthly["market"]), {"sp500", "kospi200"})
+            self.assertEqual(len(monthly), 3)
+            self.assertEqual(set(monthly["market"]), {"sp500", "kospi200", "kosdaq150"})
             payload = report_payload(root / "report.html")
             self.assertEqual([s["id"] for s in payload["screens"]], ["daily", "monthly"])
             day, month = payload["screens"]
@@ -112,13 +117,18 @@ class CombinedTests(unittest.TestCase):
             self.assertTrue(month["volumeFilter"])
             self.assertEqual(month["volumeComparison"], "gt")
             self.assertEqual(month["belowMonths"], 6)
-            self.assertEqual(len(month["hits"]), 2)
+            self.assertEqual(len(month["hits"]), 3)
             self.assertTrue(all(m["targetMonth"] == "2026-08" for m in month["markets"]))
             self.assertTrue(all(h["date"] == "2026-08-31" for h in month["hits"]))
             self.assertTrue(all(h["latestDate"] == "2026-09-11" for h in month["hits"]))
             self.assertTrue(all(h["latestSignalClose"] == 1 for h in month["hits"]))
+            self.assertTrue(all(h["retPct"] == -96.67 for h in month["hits"]))
             self.assertEqual(set(monthly["latest_date"]), {"2026-09-11"})
             self.assertEqual(set(monthly["latest_close"]), {1})
+            self.assertEqual(set(monthly["return_since_%"]), {-96.67})
+            report = (root / "report.html").read_text(encoding="utf-8")
+            self.assertIn("월말 대비 수익률", report)
+            self.assertIn("월말 실제 종가 대비", report)
             self.assertIn("10개월선 장기 돌파", (root / "summary.txt").read_text(encoding="utf-8"))
 
     def test_monthly_latest_quote_excludes_the_current_intraday_bar(self):

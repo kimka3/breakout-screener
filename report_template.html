@@ -76,8 +76,6 @@
 .monthly-audit table { font-size: 11px; }
 .monthly-audit th, .monthly-audit td { padding: 5px 8px; }
 .monthly-note { margin: 8px 0 0; color: var(--ink-3); font-size: 11px; }
-.latest-close { margin-top: 13px; padding: 8px 10px; border: 1px dashed var(--latest); border-radius: 7px; color: var(--ink-2); font-size: 11px; }
-.latest-close strong { color: var(--latest); font-family: var(--font-mono); font-size: 13px; }
 .latest-price-label { font: 11px var(--font-ui); fill: var(--latest); paint-order: stroke; stroke: var(--surface); stroke-width: 4px; stroke-linejoin: round; }
 
 body {
@@ -604,7 +602,7 @@ footer code {
       <li id="reading-hold"></li>
       <li id="reading-chart"></li>
       <li id="reading-basis"></li>
-      <li><b>PER</b>은 최근 12개월 실적 기준(trailing), <b>선행 PER</b>은 애널리스트 예상 실적 기준입니다. 최근 12개월이 적자면 trailing PER 이 성립하지 않아 <b>적자</b>로 표시되며, 이때는 선행 PER 만 참고할 수 있습니다. <b>KOSPI 200 종목은 데이터 제공처에 후행 PER 이 없어 대부분 선행 PER 만 표시됩니다.</b></li>
+      <li><b>PER</b>은 최근 12개월 실적 기준(trailing), <b>선행 PER</b>은 애널리스트 예상 실적 기준입니다. 최근 12개월이 적자면 trailing PER 이 성립하지 않아 <b>적자</b>로 표시되며, 이때는 선행 PER 만 참고할 수 있습니다. <b>국내 종목(KOSPI 200·KOSDAQ 150)은 데이터 제공처에 후행 PER 이 없어 대부분 선행 PER 만 표시됩니다.</b></li>
     </ul>
     <h2>실행 예시</h2>
     <p><code id="run-command">python sp500_breakout.py --lookback 20 --html</code></p>
@@ -640,6 +638,7 @@ const screenLabel = (s) => s.label || (s.timeframe === "month" ? s.maPeriod + "�
 
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const nf = (v, d = 2) => Number.isFinite(v) ? v.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }) : "—";
+const signedPct = (v) => Number.isFinite(v) ? (v >= 0 ? "+" : "") + nf(v) + "%" : "—";
 const vol = (v) => !Number.isFinite(v) ? "—" : v >= 1e6 ? (v / 1e6).toFixed(1) + "M" : v >= 1e3 ? Math.round(v / 1e3) + "K" : String(v);
 const md = (s) => typeof s === "string" ? s.slice(5).replace("-", "/") : "—";
 
@@ -701,9 +700,13 @@ function configureScreen() {
   document.getElementById("reading-volume").textContent = monthly
     ? "거래량은 완료된 각 월의 일별 거래량 합계입니다. 판정 월 총거래량이 그 직전 " + monthlyVolumeWindow() + "개월 월 총거래량의 산술평균보다 커야 합니다. 판정 월은 평균에서 제외하며, 평균과 같으면 통과하지 않습니다."
     : "직전 " + SCREEN.volWindow + "거래일 평균 거래량은 돌파 당일을 제외하고 계산합니다.";
-  document.getElementById("reading-return").hidden = monthly;
+  const returnNote = document.getElementById("reading-return");
+  returnNote.hidden = false;
+  returnNote.textContent = monthly
+    ? "판정표의 현재가는 실행 시 확보한 최신 확정 일봉입니다. 월말 대비 수익률은 판정 월의 실제 종가와 최신 실제 종가로 계산하므로 배당·액면분할을 반영한 총수익률이 아닙니다."
+    : "현재 행의 ‘실제’ 퍼센트와 표의 ‘실제 종가 대비’는 돌파일 실제 종가 대비 현재 실제 종가의 등락률입니다. 수정종가를 표시한 경우에도 이 등락률에는 배당·액면분할을 반영하지 않습니다. 현재 이격은 표시된 가격 기준의 이동평균선 대비 값입니다.";
   document.getElementById("reading-hold").textContent = monthly
-    ? "진행 중인 월은 제외합니다. 월말 가격과 이격은 판정 월 기준이며, 별도 표시된 최신종가는 날짜가 명시된 확정 일봉 종가입니다. 최신종가는 선정 조건이나 돌파 유지 조건으로 사용하지 않습니다."
+    ? "진행 중인 월은 제외합니다. 월말 가격과 이격은 판정 월 기준이며, 판정표의 현재가는 날짜가 명시된 확정 일봉 종가입니다. 현재가는 선정 조건이나 돌파 유지 조건으로 사용하지 않습니다."
     : SCREEN.requireHold
       ? "현재 종가가 이동평균선 위인 종목만 포함합니다. 돌파 이후 한 번도 이탈하지 않았다는 뜻은 아닙니다. 현재 이격은 이동평균선 대비 값이며, 경과는 돌파로부터 지난 거래일 수입니다."
       : "현재 종가가 이동평균선 아래인 종목도 포함합니다. 현재 이격은 이동평균선 대비 값이며, 경과는 돌파로부터 지난 거래일 수입니다.";
@@ -872,28 +875,36 @@ function volumeAuditHTML(h) {
 function latestCloseHTML(h) {
   const chosen = latestSignalPrice(h);
   const date = typeof h.latestDate === "string" ? h.latestDate : "—";
-  if (chosen === null) return `최신종가 <strong>—</strong><span class="table-date">선택 기준 종가 자료 없음 · ${esc(date)}</span>`
+  if (chosen === null) return `<strong>—</strong><span class="table-date">선택 기준 종가 자료 없음 · ${esc(date)}</span>`
     + (Number.isFinite(h.latestClose) ? `<small class="raw-price">실제 ${px(h.latestClose, h)}</small>` : "");
-  return `최신종가 <strong>${px(chosen, h)}</strong><span class="table-date">${priceLabel(h)} · ${esc(date)} 확정 일봉</span>`
+  return `<strong>${px(chosen, h)}</strong><span class="table-date">${priceLabel(h)} · ${esc(date)} 확정 일봉</span>`
     + rawPriceHTML(chosen, h.latestClose, h);
 }
 
 function monthlyCard(h, id) {
+  const current = latestSignalPrice(h);
+  const currentPrice = current === null
+    ? `<div class="v">—</div>${Number.isFinite(h.latestClose) ? `<small class="raw-price">실제 ${px(h.latestClose, h)}</small>` : ""}`
+    : `<div class="v">${px(current, h)}</div>${rawPriceHTML(current, h.latestClose, h)}`;
+  const returnClass = Number.isFinite(h.retPct) ? (h.retPct >= 0 ? "up" : "down") : "dim";
   return `<article class="card" tabindex="0" data-id="${id}">
     <div class="card-top"><span class="tkr">${esc(h.ticker)}</span><span class="co">${esc(h.name)}</span><span class="sig-date">${esc(dateLabel(h.date))}</span></div>
     <div class="metaline"><span class="sector">${esc(h.sector || (MK[h.market] || {}).label)}</span><span class="per">${perHTML(h)}</span></div>
     <p class="monthly-note">판정 월 거래량 ${nf(h.volume, 0)} &gt; 직전 ${esc(monthlyVolumeWindow())}개월 평균 ${nf(h.avgVol)} · 평균 대비 ${Number.isFinite(h.volRatio) ? nf(h.volRatio) + "x" : "—"}</p>
     <div class="grid">
-      <div class="cell hd"></div><div class="cell hd">월말 ${priceLabel(h)}</div><div class="cell hd">${esc(maLabel())}</div><div class="cell hd">이격</div>
+      <div class="cell hd"></div><div class="cell hd">${priceLabel(h)}</div><div class="cell hd">${esc(maLabel())}</div><div class="cell hd">비교</div>
       <div class="cell rl">판정 월<span>${esc(dateLabel(h.date))}</span></div>
       <div class="cell stack"><div class="v">${px(signalClose(h), h)}</div>${rawPriceHTML(signalClose(h), h.close, h)}</div>
       <div class="cell"><div class="v dim">${px(h.ma, h)}</div></div>
-      <div class="cell"><div class="v up">+${nf(h.abovePct)}%</div></div>
+      <div class="cell stack"><div class="v up">+${nf(h.abovePct)}%</div><small class="raw-price">이평선 대비</small></div>
+      <div class="cell rl">현재<span>${esc(h.latestDate || "—")}</span></div>
+      <div class="cell stack">${currentPrice}</div>
+      <div class="cell"><div class="v dim">—</div></div>
+      <div class="cell stack"><div class="v ${returnClass}">${signedPct(h.retPct)}</div><small class="raw-price">월말 실제 종가 대비</small></div>
     </div>
     ${h.lastTradingDate ? `<p class="monthly-note">판정 월 마지막 거래일 ${esc(h.lastTradingDate)}</p>` : ""}
     ${auditHTML(h)}
     ${volumeAuditHTML(h)}
-    <div class="latest-close">${latestCloseHTML(h)}</div>
     <div class="chart-head"><div class="legend">
       <span><i class="swatch up"></i>상승 월봉</span><span><i class="swatch down"></i>하락 월봉</span><span><i class="swatch ma"></i>${esc(maLabel())}</span>
       <span>${priceBasis(h) === "adj" ? "수정주가" : "실제 종가"} 기준</span>
@@ -977,11 +988,12 @@ function readoutHTML(h, i, isSignal) {
 /* ---------- table ---------- */
 function table(hits) {
   if (isMonthly()) return `<div class="tablewrap"><table>
-    <thead><tr><th>판정 월</th><th>티커</th><th>월말 가격 / 마지막 거래일</th><th>최신종가 / 날짜</th><th>${esc(maLabel())}</th><th>이격</th><th>월 총거래량</th><th>직전 ${esc(monthlyVolumeWindow())}개월 평균</th><th>평균 대비</th><th>거래량 확인</th><th>직전 ${esc(SCREEN.belowMonths || 6)}개월</th><th>PER</th><th>선행 PER</th></tr></thead>
+    <thead><tr><th>판정 월</th><th>티커</th><th>월말 가격 / 마지막 거래일</th><th>현재가 / 날짜</th><th>월말 대비 수익률</th><th>${esc(maLabel())}</th><th>이격</th><th>월 총거래량</th><th>직전 ${esc(monthlyVolumeWindow())}개월 평균</th><th>평균 대비</th><th>거래량 확인</th><th>직전 ${esc(SCREEN.belowMonths || 6)}개월</th><th>PER</th><th>선행 PER</th></tr></thead>
     <tbody>${hits.map(h => `<tr>
       <td>${esc(dateLabel(h.date))}</td><td class="sym">${esc(h.ticker)}</td>
       <td>${px(signalClose(h), h)}<small class="table-date">${priceLabel(h)}${h.lastTradingDate ? " · " + esc(h.lastTradingDate) : ""}</small>${rawPriceHTML(signalClose(h), h.close, h)}</td>
       <td>${latestCloseHTML(h)}</td>
+      <td class="${Number.isFinite(h.retPct) ? (h.retPct >= 0 ? "up" : "down") : ""}">${signedPct(h.retPct)}<small class="table-date">실제 종가 기준</small></td>
       <td>${px(h.ma, h)}</td><td class="up">+${nf(h.abovePct)}%</td>
       <td>${nf(h.volume, 0)}</td><td>${nf(h.avgVol)}</td><td>${Number.isFinite(h.volRatio) ? nf(h.volRatio) + "x" : "—"}</td>
       <td>${volumeAuditHTML(h)}</td>

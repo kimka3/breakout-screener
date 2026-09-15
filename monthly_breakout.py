@@ -20,6 +20,7 @@ CHART_MONTHS = 36
 MARKET_DISPLAY = {
     "sp500": {"label": "S&P 500", "currency": "USD", "decimals": 2},
     "kospi200": {"label": "KOSPI 200", "currency": "KRW", "decimals": 0},
+    "kosdaq150": {"label": "KOSDAQ 150", "currency": "KRW", "decimals": 0},
 }
 
 
@@ -178,7 +179,8 @@ def _chart(monthly, row, audit, volume_audit, yahoo):
         "latestDate": row["latest_date"], "latestClose": row["latest_close"],
         "latestSignalClose": row["latest_signal_close"],
         "lastClose": row["last_close"], "lastSignalClose": row["last_signal_close"],
-        "lastMa": row["ma10"], "lastPct": row["last_above_ma_%"], "retPct": 0.0,
+        "lastMa": row["ma10"], "lastPct": row["last_above_ma_%"],
+        "retPct": row["return_since_%"],
         "barsSince": 0, "sigIndex": len(window) - 1,
         "dates": [_month_end(month) for month in window.index],
         "opens": clean("Open"), "highs": clean("High"), "lows": clean("Low"),
@@ -215,8 +217,9 @@ def scan_monthly_market(prices, meta, market, as_of, price_basis="adj"):
     for field in ("name", "sector"):
         info[field] = info[field].map(_text) if field in info else ""
     if "yahoo" not in info:
-        if market == "kospi200":
-            info["yahoo"] = info["ticker"].map(lambda t: f"{t.zfill(6)}.KS")
+        if market in ("kospi200", "kosdaq150"):
+            suffix = ".KS" if market == "kospi200" else ".KQ"
+            info["yahoo"] = info["ticker"].map(lambda t: f"{t.zfill(6)}{suffix}")
         else:
             info["yahoo"] = info["ticker"].map(lambda t: t.replace(".", "-").upper())
     info = info.drop_duplicates("yahoo")
@@ -318,6 +321,8 @@ def scan_monthly_market(prices, meta, market, as_of, price_basis="adj"):
         decimals = MARKET_DISPLAY[market]["decimals"]
         above = (float(current["Close"]) / float(current["MA"]) - 1) * 100
         latest_date, latest_close, latest_signal_close = _latest_quote(prices[yahoo], as_of, price_basis)
+        return_since = ((latest_close / float(current["RawClose"]) - 1) * 100
+                        if latest_close is not None else None)
         row = {
             "market": market, "date": _month_end(target), "target_month": str(target),
             "last_trading_date": current["LastTradingDate"], "ticker": record["ticker"],
@@ -333,7 +338,8 @@ def scan_monthly_market(prices, meta, market, as_of, price_basis="adj"):
             "prior_below_end": str(previous_months[-1]), "prior_below_months": BELOW_MONTHS,
             "last_close": round(float(current["RawClose"]), decimals),
             "last_signal_close": round(float(current["Close"]), 4),
-            "last_above_ma_%": round(above, 2), "return_since_%": 0.0,
+            "last_above_ma_%": round(above, 2),
+            "return_since_%": round(return_since, 2) if return_since is not None else None,
             "bars_since": 0, "latest_date": latest_date,
             "latest_close": round(latest_close, decimals) if latest_close is not None else None,
             "latest_signal_close": round(latest_signal_close, 4) if latest_signal_close is not None else None,
