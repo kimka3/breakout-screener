@@ -11,6 +11,8 @@ import math
 
 import pandas as pd
 
+from relative_strength import RS_CSV_COLUMNS
+
 
 MA_MONTHS = 10
 BELOW_MONTHS = 6
@@ -41,7 +43,8 @@ def monthly_result_columns():
             "volume_window_end", "prior_below_start", "prior_below_end",
             "prior_below_months", "last_close", "last_signal_close", "last_above_ma_%",
             "return_since_%", "bars_since", "latest_date", "latest_close",
-            "latest_signal_close", "price_basis", "per", "forward_per", "eps",
+            "latest_signal_close", "price_basis", *RS_CSV_COLUMNS,
+            "per", "forward_per", "eps",
             "fundamentals_as_of"]
 
 

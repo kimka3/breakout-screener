@@ -126,9 +126,19 @@ class CombinedTests(unittest.TestCase):
             self.assertEqual(set(monthly["latest_date"]), {"2026-09-11"})
             self.assertEqual(set(monthly["latest_close"]), {1})
             self.assertEqual(set(monthly["return_since_%"]), {-96.67})
+            self.assertTrue(monthly["rs_rating"].between(1, 99).all())
+            self.assertEqual(set(monthly["rs_universe"]),
+                             {"S&P 500", "KOSPI 200 + KOSDAQ 150"})
+            self.assertTrue(all(hit["rs"] and 1 <= hit["rs"]["rating"] <= 99
+                                for hit in month["hits"]))
+            korea = [m for m in month["markets"] if m["id"] in {"kospi200", "kosdaq150"}]
+            self.assertTrue(all(m["rsUniverse"] == "KOSPI 200 + KOSDAQ 150" for m in korea))
+            self.assertTrue(all(m["rsUniverseSize"] == 2 for m in korea))
             report = (root / "report.html").read_text(encoding="utf-8")
             self.assertIn("월말 대비 수익률", report)
             self.assertIn("월말 실제 종가 대비", report)
+            self.assertIn("오닐식 RS", report)
+            self.assertIn('id="sort-rs"', report)
             self.assertIn("10개월선 장기 돌파", (root / "summary.txt").read_text(encoding="utf-8"))
 
     def test_monthly_latest_quote_excludes_the_current_intraday_bar(self):

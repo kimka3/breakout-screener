@@ -74,6 +74,13 @@ setup_ca_bundle()
 
 import pandas as pd  # noqa: E402
 import yfinance as yf  # noqa: E402
+from relative_strength import (  # noqa: E402
+    MARKET_COUNTRY,
+    RS_CSV_COLUMNS,
+    calculate_relative_strength,
+    csv_fields as rs_csv_fields,
+    report_fields as rs_report_fields,
+)
 
 WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 CONSTITUENTS_CSV = CACHE_DIR / "sp500_constituents.csv"
@@ -648,9 +655,13 @@ def write_summary(rows, markets, args, out_path: Path, top=8):
             dec = m["decimals"]
             for r in sorted(hits, key=lambda x: -x["vol_ratio"])[:top]:
                 ret = r["return_since_%"]
+                rs = (f"  RS {int(r['rs_rating'])}"
+                      if isinstance(r.get("rs_rating"), (int, float))
+                      and math.isfinite(r["rs_rating"]) else "")
                 lines.append(
                     f"  {r['ticker']} {r['name'][:14]}"
                     f"  {r['vol_ratio']:.2f}x"
+                    f"{rs}"
                     f"  {r['last_close']:,.{dec}f}"
                     f"  ({ret:+.1f}%)"
                 )
@@ -667,7 +678,10 @@ def write_summary(rows, markets, args, out_path: Path, top=8):
             if not hits:
                 lines.append("  해당 없음")
             for h in sorted(hits, key=lambda h: (-h["abovePct"], h["ticker"]))[:top]:
-                lines.append(f"  {h['ticker']} {h['name'][:14]}  이격 {h['abovePct']:+.2f}%")
+                rs = h.get("rs") or {}
+                rs_label = f"  RS {rs['rating']}" if isinstance(rs.get("rating"), int) else ""
+                lines.append(f"  {h['ticker']} {h['name'][:14]}  이격 {h['abovePct']:+.2f}%"
+                             f"{rs_label}")
             if len(hits) > top:
                 lines.append(f"  … 외 {len(hits) - top}건")
             lines.append("")
@@ -741,7 +755,8 @@ def result_columns(args):
     return ["market", "date", "ticker", "name", "sector", "close", "signal_close",
             f"ma{args.ma}", "above_ma_%", "volume", f"avg_vol_{args.vol_window}d",
             "vol_ratio", "last_close", "last_signal_close", "last_above_ma_%",
-            "return_since_%", "bars_since", "price_basis", "per", "forward_per", "eps",
+            "return_since_%", "bars_since", "price_basis", *RS_CSV_COLUMNS,
+            "per", "forward_per", "eps",
             "fundamentals_as_of"]
 
 
@@ -795,7 +810,10 @@ def main() -> int:
     # MA 기간 + 여유분 확보 (거래일 -> 달력일 환산 약 1.55배 + 버퍼)
     # HTML 리포트는 차트 구간 내내 MA 선이 그려져야 하므로 그만큼 더 받는다.
     span = args.ma + args.vol_window + args.lookback + (CHART_WINDOW if args.html else 0)
-    start_date = end_date - timedelta(days=int(span * 1.55) + 40)
+    start_date = min(
+        end_date - timedelta(days=int(span * 1.55) + 40),
+        end_date - timedelta(days=400),  # 오닐식 RS의 12개월 4개 분기 계산 여유분
+    )
     if args.with_monthly:
         # Full calendar months for monthly OHLCV and a useful long-term chart.
         start_date = min(start_date, (pd.Period(end_date, freq="M") - 48).start_time.date())
@@ -807,6 +825,7 @@ def main() -> int:
     selected = list(MARKETS) if args.market == "all" else [args.market]
     rows, charts, market_summaries = [], [], []
     monthly_rows, monthly_charts, monthly_markets = [], [], []
+    rs_frames = {}
     scan_errors = []
 
     for mk in selected:
@@ -829,6 +848,8 @@ def main() -> int:
         # Monthly charts also show the latest completed daily close. Remove the
         # in-progress daily bar before either strategy consumes the same feed.
         prices = {t: drop_partial_bar(df, mk) for t, df in prices.items()}
+        rs_frames.update({(mk, ticker): frame for ticker, frame in prices.items()
+                          if isinstance(frame, pd.DataFrame) and not frame.empty})
         if args.with_monthly:
             from monthly_breakout import scan_monthly_market
 
@@ -1003,7 +1024,21 @@ def main() -> int:
     if not rows:
         print("\n조건을 만족하는 종목이 없습니다.")
 
+    rs_ratings, rs_groups = calculate_relative_strength(rs_frames, args.price_basis)
     all_rows = rows + monthly_rows
+    all_charts = charts + monthly_charts
+    for row in all_rows:
+        row.update(rs_csv_fields(rs_ratings.get((row["market"], row["_y"]))))
+    for chart in all_charts:
+        chart["rs"] = rs_report_fields(
+            rs_ratings.get((chart["market"], chart["_y"])))
+    for summary in market_summaries + monthly_markets:
+        group = rs_groups.get(MARKET_COUNTRY.get(summary["id"]), {})
+        summary["rsAsOf"] = group.get("asOf")
+        summary["rsUniverse"] = group.get("universe")
+        summary["rsUniverseSize"] = group.get("universeSize", 0)
+        summary["rsRanked"] = group.get("rankedByMarket", {}).get(summary["id"], 0)
+
     args.fundamentals_as_of = (datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M")
                                + " KST") if all_rows else None
     funda = fetch_fundamentals(sorted({r["_y"] for r in all_rows})) if all_rows else {}
@@ -1015,7 +1050,7 @@ def main() -> int:
         r["eps"] = _num(f.get("eps"))
         if not str(r.get("sector") or "").strip():
             r["sector"] = _text(f.get("sector"))
-    for c in charts + monthly_charts:
+    for c in all_charts:
         f = funda.get(c.pop("_y"), {})
         c["per"] = _num(f.get("per"))
         c["forwardPer"] = _num(f.get("forward_per"))

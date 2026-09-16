@@ -191,7 +191,8 @@ class MainTests(unittest.TestCase):
         csv = pd.read_csv(self.csv)
         self.assertTrue(csv.empty)
         self.assertTrue({"market", "date", "ticker", "close", "ma3", "vol_ratio",
-                         "last_close", "bars_since"}.issubset(csv.columns))
+                         "last_close", "bars_since", "rs_rating", "rs_weighted_score_%",
+                         "rs_latest_3m_%", "rs_universe"}.issubset(csv.columns))
         self.assertNotIn("DO_NOT_KEEP", self.csv.read_text(encoding="utf-8-sig"))
         self.assertEqual(report_payload(self.html)["hits"], [])
         self.assertTrue(self.summary.exists())

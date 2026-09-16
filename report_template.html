@@ -65,7 +65,7 @@
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
-.screen-panel { display: flex; flex-direction: column; gap: 22px; }
+.screen-panel { display: flex; flex-direction: column; gap: 22px; min-width: 0; }
 .screen-tabs { gap: 8px; padding-bottom: 4px; }
 .screen-tab { flex: 1; min-width: 145px; border-radius: 10px; padding: 11px 14px; }
 .strategy-title { margin: 0 0 12px; font-size: 21px; letter-spacing: -.025em; }
@@ -148,12 +148,14 @@ h1 {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 8px;
+  min-width: 0;
 }
 .tile {
   background: var(--surface);
   border: 1px solid var(--rule-soft);
   border-radius: 10px;
   padding: 12px 12px 11px;
+  min-width: 0;
 }
 .tile .k {
   font-size: 11.5px;
@@ -244,7 +246,7 @@ h1 {
 .markets .mk:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 /* ---------- card ---------- */
-.cards { display: flex; flex-direction: column; gap: 12px; }
+.cards { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 
 .card {
   background: var(--surface);
@@ -252,6 +254,7 @@ h1 {
   border-radius: 12px;
   padding: 15px 15px 12px;
   box-shadow: var(--shadow);
+  min-width: 0;
 }
 .card-top {
   display: flex;
@@ -301,6 +304,50 @@ h1 {
   font-variant-numeric: tabular-nums;
 }
 .per b.loss { font-family: var(--font-ui); color: var(--accent); }
+.card-metrics { display: inline-flex; align-items: center; justify-content: flex-end; gap: 7px; }
+
+/* O'Neil-style relative strength — compact by default, auditable on tap */
+.rs-box {
+  margin-top: 9px;
+  padding: 8px 10px;
+  border: 1px solid var(--rule-soft);
+  border-radius: 8px;
+  background: var(--surface-sub);
+  color: var(--ink-2);
+  font-size: 11px;
+}
+.rs-box summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 9px;
+  cursor: pointer;
+  list-style: none;
+}
+.rs-box summary::-webkit-details-marker { display: none; }
+.rs-box summary span:first-child { color: var(--ink-2); font-weight: 600; }
+.rs-box summary b {
+  margin-left: 3px;
+  font: 700 17px/1 var(--font-display);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+.rs-box.leader summary b, .rs-table.leader > strong { color: var(--confirm); }
+.rs-box.laggard summary b, .rs-table.laggard > strong { color: var(--down); }
+.rs-rank-context { color: var(--ink-3); text-align: right; }
+.rs-detail {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid var(--rule);
+}
+.rs-detail span { min-width: 0; color: var(--ink-3); }
+.rs-detail b { display: block; color: var(--ink-2); font: 600 11.5px var(--font-mono); }
+.rs-method { margin: 6px 0 0; color: var(--ink-3); font-size: 9.5px; }
+.rs-table > strong { display: block; font: 700 16px var(--font-display); }
+.rs-unavailable { color: var(--ink-3); }
 
 /* volume-ratio meter */
 .meter { margin: 12px 0 2px; }
@@ -360,7 +407,7 @@ h1 {
 /* data grid — 돌파일 vs 현재 */
 .grid {
   display: grid;
-  grid-template-columns: minmax(76px, auto) 1fr 1fr 1fr;
+  grid-template-columns: minmax(72px, auto) repeat(3, minmax(0, 1fr));
   gap: 1px;
   background: var(--rule-soft);
   border: 1px solid var(--rule-soft);
@@ -607,6 +654,7 @@ footer code {
     <span class="lbl">정렬</span>
     <button class="chip" id="sort-date" aria-pressed="true">최근순</button>
     <button class="chip" id="sort-vol" aria-pressed="false">거래량배수순</button>
+    <button class="chip" id="sort-rs" aria-pressed="false">오닐식 RS순</button>
     <span class="spacer"></span>
     <button class="chip" id="view-card" aria-pressed="true">카드</button>
     <button class="chip" id="view-table" aria-pressed="false">표</button>
@@ -624,6 +672,7 @@ footer code {
       <li id="reading-hold"></li>
       <li id="reading-chart"></li>
       <li id="reading-basis"></li>
+      <li><b>오닐식 RS(근사)</b>는 12개월 가격성과를 최근 3개월 40%, 그 이전 세 분기 각각 20%로 가중한 뒤 같은 국가의 추적 유니버스에서 1~99로 순위화합니다. 한국은 KOSPI 200과 KOSDAQ 150을 합쳐 비교하고 미국은 S&amp;P 500 안에서 비교합니다. 전체 상장종목을 사용하는 공식 William O'Neil/IBD 유료 지표와는 범위가 다릅니다.</li>
       <li><b>PER</b>은 최근 12개월 실적 기준(trailing), <b>선행 PER</b>은 애널리스트 예상 실적 기준입니다. 최근 12개월이 적자면 trailing PER 이 성립하지 않아 <b>적자</b>로 표시되며, 이때는 선행 PER 만 참고할 수 있습니다. <b>국내 종목(KOSPI 200·KOSDAQ 150)은 데이터 제공처에 후행 PER 이 없어 대부분 선행 PER 만 표시됩니다.</b></li>
       <li><b>RIM 적정가</b>는 국내 돌파 종목에만 표시합니다. RIM Lab의 동일 전망에 초과이익 지속계수(ω) 0.60·0.75·0.95를 각각 적용한 주당가치 중 최솟값이며, 상승여력은 RIM 조회 시점 현재가를 기준으로 계산합니다. 돌파 판정 가격과 조회시점이 다를 수 있습니다.</li>
     </ul>
@@ -699,6 +748,40 @@ function perHTML(h) {
           : (h.eps != null && h.eps < 0) ? `<b class="loss">적자</b>` : `<b>—</b>`;
   const f = h.forwardPer != null ? ` · 선행 <b>${h.forwardPer.toFixed(1)}</b>` : "";
   return `PER ${t}${f}`;
+}
+
+/* ---------- William O'Neil-style relative strength ---------- */
+const validRs = (h) => h?.rs && Number.isInteger(h.rs.rating)
+  && h.rs.rating >= 1 && h.rs.rating <= 99
+  && Number.isFinite(h.rs.weightedScorePct)
+  && Array.isArray(h.rs.quarterReturnsPct) && h.rs.quarterReturnsPct.length === 4;
+const rsTone = (rating) => rating >= 80 ? "leader" : rating < 40 ? "laggard" : "neutral";
+const rsTop = (rating) => Math.max(1, 100 - rating);
+
+function rsHTML(h) {
+  if (!validRs(h)) {
+    return `<div class="rs-box rs-unavailable">오닐식 RS · 12개월 이력 또는 공통 기준일 자료 부족</div>`;
+  }
+  const rs = h.rs, q = rs.quarterReturnsPct;
+  return `<details class="rs-box ${rsTone(rs.rating)}">
+    <summary><span>오닐식 RS <b>${esc(rs.rating)}</b>/99</span><span class="rs-rank-context">상위 ${esc(rsTop(rs.rating))}% · ${esc(rs.universeSize)}종목</span></summary>
+    <div class="rs-detail">
+      <span>가중점수<b>${signedPct(rs.weightedScorePct)}</b></span>
+      <span>12개월 가격성과<b>${signedPct(rs.twelveMonthReturnPct)}</b></span>
+      <span>기준일<b>${esc(rs.asOf)}</b></span>
+      <span>최근 3개월 · 40%<b>${signedPct(q[0])}</b></span>
+      <span>4~6개월 · 20%<b>${signedPct(q[1])}</b></span>
+      <span>7~9개월 · 20%<b>${signedPct(q[2])}</b></span>
+      <span>10~12개월 · 20%<b>${signedPct(q[3])}</b></span>
+    </div>
+    <p class="rs-method">${esc(rs.universe)} 추적 유니버스 내 근사 순위 · ${rs.priceBasis === "adj" ? "수정주가" : "종가"} 기준</p>
+  </details>`;
+}
+
+function rsTableCell(h) {
+  if (!validRs(h)) return '<td class="rs-table rs-unavailable">—<small class="table-date">산출 불가</small></td>';
+  const rs = h.rs;
+  return `<td class="rs-table ${rsTone(rs.rating)}"><strong>${esc(rs.rating)}</strong><small class="table-date">/99 · 상위 ${esc(rsTop(rs.rating))}%</small><small class="table-date">${esc(rs.universeSize)}종목 · ${esc(rs.asOf)}</small></td>`;
 }
 
 /* ---------- header ---------- */
@@ -879,6 +962,9 @@ function header() {
   period.textContent = isMonthly() ? "판정 월 " + (m.targetMonth || dateLabel(m.latest))
     + " · 직전 " + (SCREEN.belowMonths || 6) + "개월 " + (m.priorBelowStart || "—") + " ~ " + (m.priorBelowEnd || "—")
     + " · 거래량 평균 기간 " + (volumeMonths[0] || "—") + " ~ " + (volumeMonths[volumeMonths.length - 1] || "—") : "";
+  const rsMeta = m.rsUniverseSize
+    ? " · 오닐식 RS " + m.rsUniverse + " " + m.rsUniverseSize + "종목 · 기준 " + m.rsAsOf
+    : " · 오닐식 RS 산출자료 부족";
   document.getElementById("asof").textContent =
     (isMonthly() ? "완료된 월봉 기준" : "기준 거래일 " + (m.latest || "—") + " · 최근 " + SCREEN.lookback + "거래일 검색")
     + " · 생성 " + SCREEN.generatedAt +
@@ -888,7 +974,7 @@ function header() {
     (m.noHistory ? " · 이력 부족 " + m.noHistory + "종목 제외" : "") +
     (m.shortHistory ? " · 이력이 짧아 일부만 평가된 " + m.shortHistory + "종목" : "") +
     (m.gapped && !m.degraded ? " · 거래일 누락 " + m.gapped + "종목 제외" : "") +
-    (m.incomplete ? " · 미완료 월봉 " + m.incomplete + "종목 제외" : "");
+    (m.incomplete ? " · 미완료 월봉 " + m.incomplete + "종목 제외" : "") + rsMeta;
   const warn = document.getElementById("degraded");
   if (m.degraded) {
     warn.hidden = false;
@@ -1013,7 +1099,8 @@ function monthlyCard(h, id) {
   const returnClass = Number.isFinite(h.retPct) ? (h.retPct >= 0 ? "up" : "down") : "dim";
   return `<article class="card" tabindex="0" data-id="${id}">
     <div class="card-top"><span class="tkr">${esc(h.ticker)}</span><span class="co">${esc(h.name)}</span><span class="sig-date">${esc(dateLabel(h.date))}</span></div>
-    <div class="metaline"><span class="sector">${esc(h.sector || (MK[h.market] || {}).label)}</span><span class="per">${perHTML(h)}</span></div>
+    <div class="metaline"><span class="sector">${esc(h.sector || (MK[h.market] || {}).label)}</span><span class="card-metrics"><span class="per">${perHTML(h)}</span></span></div>
+    ${rsHTML(h)}
     <p class="monthly-note">판정 월 거래량 ${nf(h.volume, 0)} &gt; 직전 ${esc(monthlyVolumeWindow())}개월 평균 ${nf(h.avgVol)} · 평균 대비 ${Number.isFinite(h.volRatio) ? nf(h.volRatio) + "x" : "—"}</p>
     <div class="grid">
       <div class="cell hd"></div><div class="cell hd">${priceLabel(h)}</div><div class="cell hd">${esc(maLabel())}</div><div class="cell hd">비교</div>
@@ -1052,8 +1139,10 @@ function card(h, id) {
   </div>
   <div class="metaline">
     <span class="sector">${esc(h.sector || (MK[h.market] || {}).label)}</span>
-    <span class="per">${perHTML(h)}</span>
+    <span class="card-metrics"><span class="per">${perHTML(h)}</span></span>
   </div>
+
+  ${rsHTML(h)}
 
   <div class="meter">
     <div class="meter-head">
@@ -1115,9 +1204,10 @@ function readoutHTML(h, i, isSignal) {
 /* ---------- table ---------- */
 function table(hits) {
   if (isMonthly()) return `<div class="tablewrap"><table>
-    <thead><tr><th>판정 월</th><th>티커</th><th>RIM 적정가 / 기준가</th><th>RIM 상승여력</th><th>월말 가격 / 마지막 거래일</th><th>현재가 / 날짜</th><th>월말 대비 수익률</th><th>${esc(maLabel())}</th><th>이격</th><th>월 총거래량</th><th>직전 ${esc(monthlyVolumeWindow())}개월 평균</th><th>평균 대비</th><th>거래량 확인</th><th>직전 ${esc(SCREEN.belowMonths || 6)}개월</th><th>PER</th><th>선행 PER</th></tr></thead>
+    <thead><tr><th>판정 월</th><th>티커</th><th>오닐식 RS</th><th>RIM 적정가 / 기준가</th><th>RIM 상승여력</th><th>월말 가격 / 마지막 거래일</th><th>현재가 / 날짜</th><th>월말 대비 수익률</th><th>${esc(maLabel())}</th><th>이격</th><th>월 총거래량</th><th>직전 ${esc(monthlyVolumeWindow())}개월 평균</th><th>평균 대비</th><th>거래량 확인</th><th>직전 ${esc(SCREEN.belowMonths || 6)}개월</th><th>PER</th><th>선행 PER</th></tr></thead>
     <tbody>${hits.map(h => `<tr>
       <td>${esc(dateLabel(h.date))}</td><td class="sym">${esc(h.ticker)}</td>
+      ${rsTableCell(h)}
       ${rimTableCells(h)}
       <td>${px(signalClose(h), h)}<small class="table-date">${priceLabel(h)}${h.lastTradingDate ? " · " + esc(h.lastTradingDate) : ""}</small>${rawPriceHTML(signalClose(h), h.close, h)}</td>
       <td>${latestCloseHTML(h)}</td>
@@ -1131,13 +1221,14 @@ function table(hits) {
     </tr>`).join("")}</tbody></table></div>`;
   return `<div class="tablewrap"><table>
   <thead><tr>
-    <th>돌파일</th><th>티커</th><th>RIM 적정가 / 기준가</th><th>RIM 상승여력</th><th>돌파 가격</th><th>배수</th>
+    <th>돌파일</th><th>티커</th><th>오닐식 RS</th><th>RIM 적정가 / 기준가</th><th>RIM 상승여력</th><th>돌파 가격</th><th>배수</th>
     <th>현재 가격 / 거래일</th><th>실제 종가 대비</th><th>MA${esc(SCREEN.maPeriod)}</th><th>현재 이격</th><th>경과</th>
     <th>PER</th><th>선행 PER</th>
   </tr></thead>
   <tbody>${hits.map(h => `<tr>
     <td style="font-size:12px;color:var(--ink-3)">${esc(h.date)}</td>
     <td class="sym">${esc(h.ticker)}</td>
+    ${rsTableCell(h)}
     ${rimTableCells(h)}
     <td>${px(signalClose(h), h)}<small class="table-date">${priceLabel(h)}</small>${rawPriceHTML(signalClose(h), h.close, h)}</td>
     <td class="hot">${nf(h.volRatio)}x</td>
@@ -1157,6 +1248,14 @@ const tableEl = document.getElementById("tableview");
 
 function sorted() {
   const a = SCREEN.hits.filter(h => h.market === curMarket);
+  const rsValue = h => validRs(h) ? h.rs.rating : -Infinity;
+  const rsScore = h => validRs(h) ? h.rs.weightedScorePct : -Infinity;
+  const byRs = (x, y) => rsValue(y) - rsValue(x) || rsScore(y) - rsScore(x)
+    || String(x.ticker).localeCompare(String(y.ticker));
+  if (sortKey === "rs") {
+    a.sort(byRs);
+    return a;
+  }
   if (isMonthly()) {
     const gap = h => Number.isFinite(h.abovePct) ? h.abovePct : -Infinity;
     const byGap = (x, y) => gap(y) - gap(x) || String(x.ticker).localeCompare(String(y.ticker));
@@ -1226,9 +1325,15 @@ function pair(aId, bId, onA, onB) {
   });
 }
 
-pair("sort-date", "sort-vol",
-  () => { sortKey = "date"; render(); },
-  () => { sortKey = "vol"; render(); });
+const sortButtons = ["date", "vol", "rs"];
+function setSort(next) {
+  sortKey = next;
+  sortButtons.forEach(key => document.getElementById("sort-" + key)
+    .setAttribute("aria-pressed", String(key === sortKey)));
+  render();
+}
+sortButtons.forEach(key => document.getElementById("sort-" + key)
+  .addEventListener("click", () => setSort(key)));
 
 pair("view-card", "view-table",
   () => { cardsEl.hidden = false; tableEl.hidden = true; },
@@ -1247,6 +1352,7 @@ function selectScreen(id) {
   tableEl.hidden = state.view !== "table";
   document.getElementById("sort-date").setAttribute("aria-pressed", String(sortKey === "date"));
   document.getElementById("sort-vol").setAttribute("aria-pressed", String(sortKey === "vol"));
+  document.getElementById("sort-rs").setAttribute("aria-pressed", String(sortKey === "rs"));
   document.getElementById("view-card").setAttribute("aria-pressed", String(state.view === "card"));
   document.getElementById("view-table").setAttribute("aria-pressed", String(state.view === "table"));
   screenRow.querySelectorAll(".screen-tab").forEach(btn => {
