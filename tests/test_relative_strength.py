@@ -49,15 +49,15 @@ class RelativeStrengthTests(unittest.TestCase):
 
     def test_korean_indices_share_one_country_universe(self):
         inputs = {
-            ("kospi200", "005930.KS"): frame([100, 105, 110, 115, 120]),
+            ("kospi", "005930.KS"): frame([100, 105, 110, 115, 120]),
             ("kosdaq150", "196170.KQ"): frame([100, 110, 120, 130, 140]),
         }
         ratings, groups = calculate_relative_strength(inputs)
-        self.assertEqual(groups["KR"]["universe"], "KOSPI 200 + KOSDAQ 150")
+        self.assertEqual(groups["KR"]["universe"], "KOSPI + KOSDAQ 150")
         self.assertEqual(groups["KR"]["universeSize"], 2)
-        self.assertEqual(ratings[("kospi200", "005930.KS")]["universeSize"], 2)
+        self.assertEqual(ratings[("kospi", "005930.KS")]["universeSize"], 2)
         self.assertGreater(ratings[("kosdaq150", "196170.KQ")]["rating"],
-                           ratings[("kospi200", "005930.KS")]["rating"])
+                           ratings[("kospi", "005930.KS")]["rating"])
 
     def test_stale_or_short_history_is_not_silently_ranked(self):
         current = frame([100, 105, 110, 115, 120])

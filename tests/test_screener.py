@@ -155,7 +155,7 @@ class ChartTests(unittest.TestCase):
         frame = price_frame([10, 10, 10, 12], [100, 100, 100, 200])
         hit = screener.find_signals(frame, 3, 2, 2, "adj").iloc[0]
         chart = screener.build_series(frame, hit, SimpleNamespace(ma=3, price_basis="adj"),
-                                      "005930", float("nan"), float("nan"), "kospi200")
+                                      "005930", float("nan"), float("nan"), "kospi")
         self.assertEqual(chart["name"], "")
         self.assertEqual(chart["sector"], "")
         json.dumps(chart, allow_nan=False)
@@ -233,20 +233,20 @@ class MainTests(unittest.TestCase):
         fundamentals.assert_not_called()
 
     def test_kospi_cached_blank_sector_can_use_empty_or_fundamental_fallback(self):
-        universe_path = self.root / "kospi200_constituents.csv"
+        universe_path = self.root / "kospi_constituents.csv"
         pd.DataFrame({"ticker": ["005930"], "name": ["삼성전자"], "sector": [""]}).to_csv(
             universe_path, index=False)
         cached_meta = pd.read_csv(universe_path, dtype={"ticker": str})
         self.assertTrue(pd.isna(cached_meta.iloc[0]["sector"]))
         frame = price_frame([10, 10, 10, 12], [100, 100, 100, 200])
-        argv = ["sp500_breakout.py", "--market", "kospi200", "--ma", "3",
+        argv = ["sp500_breakout.py", "--market", "kospi", "--min-turnover", "0", "--ma", "3",
                 "--vol-window", "2", "--lookback", "1", "--date", "2026-08-31",
                 "--out", str(self.csv), "--html", str(self.html),
                 "--summary", str(self.summary)]
         for fallback in ("", "Technology"):
             with self.subTest(fallback=fallback), \
                  patch.object(sys, "argv", argv), \
-                 patch.dict(screener.MARKETS["kospi200"],
+                 patch.dict(screener.MARKETS["kospi"],
                             {"loader": lambda **_kwargs: cached_meta.copy()}), \
                  patch.object(screener, "download_prices", return_value={"005930.KS": frame}), \
                  patch.object(screener, "fetch_fundamentals",
@@ -259,7 +259,7 @@ class MainTests(unittest.TestCase):
                 payload = report_payload(self.html)
                 self.assertEqual(payload["hits"][0]["name"], "삼성전자")
                 self.assertEqual(payload["hits"][0]["sector"], fallback)
-                self.assertEqual(payload["hits"][0]["market"], "kospi200")
+                self.assertEqual(payload["hits"][0]["market"], "kospi")
 
     def test_main_applies_lookback_and_keeps_raw_output_quotes(self):
         frame = price_frame([20, 20, 20, 24, 18, 26],
@@ -303,9 +303,9 @@ class MainTests(unittest.TestCase):
                                price_basis="raw", no_hold=False, date=None,
                                fundamentals_as_of="2026-09-16 08:00 KST")
         chart = screener.build_series(
-            frame, hit, args, "005930", "삼성전자", "", "kospi200")
+            frame, hit, args, "005930", "삼성전자", "", "kospi")
         with redirect_stdout(io.StringIO()):
-            screener.write_html([chart], args, [{"id": "kospi200"}], self.html)
+            screener.write_html([chart], args, [{"id": "kospi"}], self.html)
         report = self.html.read_text(encoding="utf-8")
         self.assertIn("https://rim-lab-korea.onrender.com/api/public/rim", report)
         self.assertIn("RIM 적정가", report)

@@ -5,7 +5,7 @@ and each of the preceding three quarters a 20% weight.  The weighted scores
 are then ranked against the other securities in the same tracked country
 universe and mapped to 1..99.
 
-This repository only tracks the S&P 500 and KOSPI 200 + KOSDAQ 150.  The
+This repository only tracks the S&P 500 and KOSPI + KOSDAQ 150.  The
 result is therefore an approximation within those tracked universes, not the
 licensed William O'Neil / IBD Relative Strength Rating for every listed stock.
 """
@@ -26,12 +26,12 @@ RS_CSV_COLUMNS = [
 ]
 MARKET_COUNTRY = {
     "sp500": "US",
-    "kospi200": "KR",
+    "kospi": "KR",
     "kosdaq150": "KR",
 }
 MARKET_LABEL = {
     "sp500": "S&P 500",
-    "kospi200": "KOSPI 200",
+    "kospi": "KOSPI",
     "kosdaq150": "KOSDAQ 150",
 }
 MARKET_ORDER = tuple(MARKET_COUNTRY)

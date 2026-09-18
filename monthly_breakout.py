@@ -21,7 +21,7 @@ REQUIRED_MONTHS = MA_MONTHS + BELOW_MONTHS
 CHART_MONTHS = 36
 MARKET_DISPLAY = {
     "sp500": {"label": "S&P 500", "currency": "USD", "decimals": 2},
-    "kospi200": {"label": "KOSPI 200", "currency": "KRW", "decimals": 0},
+    "kospi": {"label": "KOSPI", "currency": "KRW", "decimals": 0},
     "kosdaq150": {"label": "KOSDAQ 150", "currency": "KRW", "decimals": 0},
 }
 
@@ -220,8 +220,8 @@ def scan_monthly_market(prices, meta, market, as_of, price_basis="adj"):
     for field in ("name", "sector"):
         info[field] = info[field].map(_text) if field in info else ""
     if "yahoo" not in info:
-        if market in ("kospi200", "kosdaq150"):
-            suffix = ".KS" if market == "kospi200" else ".KQ"
+        if market in ("kospi", "kosdaq150"):
+            suffix = ".KS" if market == "kospi" else ".KQ"
             info["yahoo"] = info["ticker"].map(lambda t: f"{t.zfill(6)}{suffix}")
         else:
             info["yahoo"] = info["ticker"].map(lambda t: t.replace(".", "-").upper())

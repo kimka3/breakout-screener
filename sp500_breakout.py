@@ -1,5 +1,5 @@
 """
-S&P 500·KOSPI 200·KOSDAQ 150 이동평균선 돌파 스크리너
+S&P 500·KOSPI·KOSDAQ 150 이동평균선 돌파 스크리너
 
 조건
   1) 종가가 120일 이동평균선을 상향 돌파 (전일: 종가 <= MA120, 당일: 종가 > MA120)
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 from collections import Counter
 import json
 import math
@@ -154,69 +155,63 @@ def load_sp500(refresh: bool = False) -> pd.DataFrame:
         raise SystemExit(f"S&P 500 구성종목을 가져오지 못했습니다: {exc}")
 
 
-KOSPI200_CSV = CACHE_DIR / "kospi200_constituents.csv"
-NAVER_KPI200 = "https://finance.naver.com/sise/entryJongmok.naver?&page={page}&type=KPI200"
 KOSDAQ150_CSV = CACHE_DIR / "kosdaq150_constituents.csv"
 KODEX_KOSDAQ150 = "https://www.samsungfund.com/api/v1/kodex/product/2ETF54.do"
 
 
-def load_kospi200(refresh: bool = False) -> pd.DataFrame:
-    """네이버 금융의 코스피200 편입종목 목록. KRX 직접 조회는 사내 프록시에서 막힌다."""
-    # 이전 캐시는 영숫자 티커를 누락하고 뒤 행의 이름을 잘못 연결할 수 있다.
-    # 기존 파일을 수정하지 않고, 행 단위 파서로 만든 캐시만 재사용한다.
-    cache_path = KOSPI200_CSV.with_name(KOSPI200_CSV.stem + "_v2.csv")
+KRX_CORP_LIST = "https://kind.krx.co.kr/corpgeneral/corpList.do"
+KOSPI_ALL_CSV = CACHE_DIR / "kospi_all_constituents.csv"
+
+
+def load_kospi_all(refresh: bool = False) -> pd.DataFrame:
+    """유가증권시장 전체 상장사. 지수 편입 명단에 기대지 않는다.
+
+    코스피200 편입종목은 네이버 페이지가 폐지(HTTP 410)되면서 받을 곳이 없어졌고,
+    증권사 오픈API도 지수 구성종목은 제공하지 않는다. 대신 KRX 상장법인목록을 쓴다.
+    인증도 차단도 없고, 회사 단위 목록이라 우선주와 스팩이 섞여 들어오지 않는다.
+
+    편입 명단이 필요 없으므로 분기 정기변경에도 손댈 일이 없다.
+    """
     if not refresh:
-        cached = _read_cached_csv(cache_path, dtype={"ticker": str})
+        cached = _read_cached_csv(KOSPI_ALL_CSV, dtype={"ticker": str})
         if cached is not None:
             return cached
 
     try:
-        import re
-        from lxml import html as lxml_html
+        html = _http_get(f"{KRX_CORP_LIST}?method=download&marketType=stockMkt",
+                         encoding="cp949")
+        tables = pd.read_html(io.StringIO(html))
+        if not tables:
+            raise RuntimeError("상장법인목록에서 표를 찾지 못했습니다")
+        source = tables[0]
+        for column in ("회사명", "종목코드"):
+            if column not in source.columns:
+                raise RuntimeError(f"'{column}' 열이 없습니다 (목록 형식 변경)")
 
-        found = {}
-        last_page = None
-        for page in range(1, 30):
-            document = lxml_html.fromstring(
-                _http_get(NAVER_KPI200.format(page=page), encoding="cp949"))
-            links = document.xpath(
-                "//td[contains(concat(' ', normalize-space(@class), ' '), ' ctg ')]/a[@href]")
-            if not links:
-                if last_page is not None and page <= last_page:
-                    raise RuntimeError(f"편입종목 {page}/{last_page}페이지가 비어 있습니다")
-                break
+        df = pd.DataFrame({
+            "ticker": source["종목코드"].astype(str).str.strip().str.zfill(6),
+            "name": source["회사명"].astype(str).str.strip(),
+            "sector": source.get("업종", "").astype(str).str.strip(),
+        })
+        # 야후가 해석하지 못하는 신주인수권·영문 혼합 코드는 버린다. 소수이고,
+        # 남겨두면 매 실행마다 시세 실패로 집계돼 경고를 흐린다.
+        df = df[df["ticker"].str.fullmatch(r"\d{6}")]
+        df = df[~df["name"].str.contains("스팩|기업인수목적", na=False)]
+        df = df.drop_duplicates(subset="ticker").reset_index(drop=True)
+        if len(df) < 500:
+            raise RuntimeError(f"상장사 수가 비정상적으로 적습니다: {len(df)}")
 
-            for link in links:
-                match = re.search(r"(?:[?&])code=([A-Za-z0-9]{6})(?:[&#]|$)", link.get("href"))
-                name = link.text_content().strip()
-                if match is None or not name:
-                    raise RuntimeError(f"편입종목 {page}페이지의 종목 행을 해석할 수 없습니다")
-                code = match.group(1).upper()
-                found.setdefault(code, name)
-
-            for href in document.xpath("//td[@class='pgRR']/a/@href"):
-                match = re.search(r"(?:[?&])page=(\d+)(?:[&#]|$)", href)
-                if match:
-                    last_page = int(match.group(1))
-            if last_page is not None:
-                if last_page >= 30:
-                    raise RuntimeError(f"편입종목 페이지 수가 예상 범위를 벗어났습니다: {last_page}")
-                if page >= last_page:
-                    break
-        if not found:
-            raise RuntimeError("편입종목을 찾지 못했습니다")
-
-        df = pd.DataFrame({"ticker": list(found.keys()), "name": list(found.values())})
-        df["sector"] = ""
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        df.to_csv(cache_path, index=False)
+        df.to_csv(KOSPI_ALL_CSV, index=False)
         return df
     except Exception as exc:
-        cached = _read_cached_csv(cache_path, max_age_days=float("inf"), dtype={"ticker": str})
+        cached = _read_cached_csv(KOSPI_ALL_CSV, max_age_days=float("inf"),
+                                  dtype={"ticker": str})
         if cached is not None:
-            print(f"[warn] 코스피200 목록 갱신 실패({exc}). 캐시를 사용합니다.", file=sys.stderr)
+            print(f"[warn] 코스피 상장사 목록 갱신 실패({exc}). 캐시를 사용합니다.",
+                  file=sys.stderr)
             return cached
-        raise SystemExit(f"코스피200 구성종목을 가져오지 못했습니다: {exc}")
+        raise SystemExit(f"코스피 상장사 목록을 가져오지 못했습니다: {exc}")
 
 
 def _validate_kosdaq150(df: pd.DataFrame) -> pd.DataFrame:
@@ -312,14 +307,18 @@ MARKETS = {
         "loader": load_sp500,
         "to_yahoo": lambda t: t.replace(".", "-").upper(),
     },
-    "kospi200": {
-        "label": "KOSPI 200",
+    "kospi": {
+        "label": "KOSPI",
         "currency": "KRW",
         "decimals": 0,
         "tz": "Asia/Seoul",
         "close": (15, 30),
-        "loader": load_kospi200,
+        "loader": load_kospi_all,
         "to_yahoo": lambda t: f"{str(t).zfill(6)}.KS",
+        # 유가증권 전체에는 하루 몇 천만 원어치만 거래되는 종목이 섞여 있다.
+        # 그런 종목은 '직전 평균의 2배' 가 몇 백 주만으로도 성립해 신호가 아니라
+        # 잡음이 된다. 거래대금 하한으로 실제로 사고팔 수 있는 종목만 남긴다.
+        "min_turnover": 3_000_000_000,   # 최근 60거래일 평균 일거래대금 30억원
     },
     "kosdaq150": {
         "label": "KOSDAQ 150",
@@ -336,6 +335,21 @@ MARKETS = {
 def to_yahoo(ticker: str) -> str:
     """BRK.B -> BRK-B 같은 야후 표기로 변환."""
     return ticker.replace(".", "-").upper()
+
+
+def average_turnover(df, window: int = 60) -> float:
+    """최근 거래일의 평균 일거래대금(종가 x 거래량). 시가총액 대신 쓴다.
+
+    시가총액은 따로 받아와야 하지만 거래대금은 이미 가진 시세만으로 구해진다.
+    돌파 신호가 실제로 체결 가능한 규모인지 보는 데는 이쪽이 더 직접적이다.
+    """
+    if df is None or getattr(df, "empty", True):
+        return 0.0
+    tail = df.tail(window)
+    if tail.empty or "Close" not in tail or "Volume" not in tail:
+        return 0.0
+    value = (tail["Close"] * tail["Volume"]).median()
+    return float(value) if pd.notna(value) else 0.0
 
 
 def drop_partial_bar(df, market: str):
@@ -762,7 +776,7 @@ def result_columns(args):
 
 def main() -> int:
     p = argparse.ArgumentParser(
-        description="S&P 500·KOSPI 200·KOSDAQ 150 이동평균선 돌파 스크리너",
+        description="S&P 500·KOSPI·KOSDAQ 150 이동평균선 돌파 스크리너",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--ma", type=int, default=120, help="이동평균 기간(거래일)")
@@ -780,6 +794,8 @@ def main() -> int:
                    help="장기 돌파 결과 CSV 경로 (--with-monthly 사용 시)")
     p.add_argument("--tickers", default=None, help="쉼표구분 티커 목록(테스트용)")
     p.add_argument("--refresh-list", action="store_true", help="구성종목 목록 강제 갱신")
+    p.add_argument("--min-turnover", type=float, default=None,
+                   help="일평균 거래대금 하한(억원). 시장 기본값을 덮어씁니다. 0 이면 필터 해제")
     p.add_argument("--out", default="breakouts.csv", help="결과 CSV 경로")
     p.add_argument("--html", nargs="?", const="report.html", default=None,
                    help="휴대폰용 HTML 리포트 생성 (경로 생략시 report.html)")
@@ -798,7 +814,7 @@ def main() -> int:
         p.error("--vol-mult는 유한한 양수여야 합니다")
     if args.tickers is not None:
         if args.market == "all":
-            p.error("--tickers에는 --market sp500, kospi200 또는 kosdaq150을 지정하세요")
+            p.error("--tickers에는 --market sp500, kospi 또는 kosdaq150을 지정하세요")
         tickers = list(dict.fromkeys(t.strip().upper() for t in args.tickers.split(",") if t.strip()))
         if not tickers:
             p.error("--tickers에 하나 이상의 티커를 입력하세요")
@@ -848,6 +864,23 @@ def main() -> int:
         # Monthly charts also show the latest completed daily close. Remove the
         # in-progress daily bar before either strategy consumes the same feed.
         prices = {t: drop_partial_bar(df, mk) for t, df in prices.items()}
+
+        # 지수 편입 명단 대신 시장 전체를 받는 경우, 하루 몇 천만 원어치만
+        # 거래되는 종목이 섞인다. 그런 종목은 '직전 평균 거래량의 2배' 가 몇 백
+        # 주만으로 성립해 신호가 아니라 잡음이 된다. 실제로 사고팔 수 있는
+        # 규모만 남긴다. 걸러낸 수는 출력에 남겨 조용히 줄어들지 않게 한다.
+        floor = (args.min_turnover * 1e8 if args.min_turnover is not None
+                 else spec.get("min_turnover"))
+        if floor:
+            liquid = {tk: df for tk, df in prices.items()
+                      if average_turnover(df) >= floor}
+            n_thin = len(prices) - len(liquid)
+            if n_thin:
+                print(f"[{spec['label']}] 거래대금 하한({floor / 1e8:.0f}억) 미달 "
+                      f"{n_thin}종목 제외 — {len(liquid)}종목 스캔")
+            prices = liquid
+            meta = meta[meta["yahoo"].isin(prices)].reset_index(drop=True)
+
         rs_frames.update({(mk, ticker): frame for ticker, frame in prices.items()
                           if isinstance(frame, pd.DataFrame) and not frame.empty})
         if args.with_monthly:

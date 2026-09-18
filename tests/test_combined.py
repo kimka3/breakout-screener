@@ -31,7 +31,7 @@ class CombinedTests(unittest.TestCase):
         frame.loc["2026-07-31", "Volume"] = float("nan")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            args = ["sp500_breakout.py", "--with-monthly", "--market", "sp500", "--tickers", "TEST,BAD",
+            args = ["sp500_breakout.py", "--min-turnover", "0", "--with-monthly", "--market", "sp500", "--tickers", "TEST,BAD",
                     "--date", "2026-09-13", "--ma", "3", "--lookback", "1", "--no-hold",
                     "--out", str(root / "d.csv"), "--monthly-out", str(root / "m.csv"),
                     "--html", str(root / "r.html"), "--summary", str(root / "s.txt")]
@@ -62,12 +62,12 @@ class CombinedTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             meta = lambda ticker: pd.DataFrame({"ticker": [ticker], "name": ["Fixture"], "sector": [""]})
-            args = ["sp500_breakout.py", "--with-monthly", "--ma", "3", "--out", str(root / "d.csv"),
+            args = ["sp500_breakout.py", "--min-turnover", "0", "--with-monthly", "--ma", "3", "--out", str(root / "d.csv"),
                     "--monthly-out", str(root / "m.csv"), "--html", str(root / "r.html")]
             with patch.object(sys, "argv", args), \
                  patch.object(screener, "datetime", wraps=datetime) as clock, \
                  patch.dict(screener.MARKETS["sp500"], {"loader": lambda refresh: meta("TEST")}), \
-                 patch.dict(screener.MARKETS["kospi200"], {"loader": lambda refresh: meta("005930")}), \
+                 patch.dict(screener.MARKETS["kospi"], {"loader": lambda refresh: meta("005930")}), \
                  patch.dict(screener.MARKETS["kosdaq150"], {"loader": lambda refresh: meta("196170")}), \
                  patch.object(screener, "download_prices", side_effect=[
                      {"TEST": frame}, {"005930.KS": frame}, {"196170.KQ": frame}]), \
@@ -77,21 +77,21 @@ class CombinedTests(unittest.TestCase):
                 self.assertEqual(screener.main(), 0)
             monthly = report_payload(root / "r.html")["screens"][1]
             self.assertEqual({m["id"]: m["targetMonth"] for m in monthly["markets"]},
-                             {"sp500": "2026-07", "kospi200": "2026-08",
+                             {"sp500": "2026-07", "kospi": "2026-08",
                               "kosdaq150": "2026-08"})
 
     def test_monthly_hits_survive_empty_daily_results_and_independent_daily_options(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             meta = lambda ticker: pd.DataFrame({"ticker": [ticker], "name": ["Fixture"], "sector": [""]})
-            args = ["sp500_breakout.py", "--with-monthly", "--market", "all",
+            args = ["sp500_breakout.py", "--min-turnover", "0", "--with-monthly", "--market", "all",
                     "--date", "2026-09-13", "--lookback", "1", "--ma", "3",
                     "--vol-mult", "99", "--no-hold", "--out", str(root / "daily.csv"),
                     "--monthly-out", str(root / "monthly.csv"), "--html", str(root / "report.html"),
                     "--summary", str(root / "summary.txt")]
             with patch.object(sys, "argv", args), \
                  patch.dict(screener.MARKETS["sp500"], {"loader": lambda refresh: meta("TEST")}), \
-                 patch.dict(screener.MARKETS["kospi200"], {"loader": lambda refresh: meta("005930")}), \
+                 patch.dict(screener.MARKETS["kospi"], {"loader": lambda refresh: meta("005930")}), \
                  patch.dict(screener.MARKETS["kosdaq150"], {"loader": lambda refresh: meta("196170")}), \
                  patch.object(screener, "download_prices", side_effect=[{"TEST": long_history()},
                                                                        {"005930.KS": long_history()},
@@ -104,7 +104,7 @@ class CombinedTests(unittest.TestCase):
             self.assertTrue(pd.read_csv(root / "daily.csv").empty)
             monthly = pd.read_csv(root / "monthly.csv")
             self.assertEqual(len(monthly), 3)
-            self.assertEqual(set(monthly["market"]), {"sp500", "kospi200", "kosdaq150"})
+            self.assertEqual(set(monthly["market"]), {"sp500", "kospi", "kosdaq150"})
             payload = report_payload(root / "report.html")
             self.assertEqual([s["id"] for s in payload["screens"]], ["daily", "monthly"])
             day, month = payload["screens"]
@@ -128,11 +128,11 @@ class CombinedTests(unittest.TestCase):
             self.assertEqual(set(monthly["return_since_%"]), {-96.67})
             self.assertTrue(monthly["rs_rating"].between(1, 99).all())
             self.assertEqual(set(monthly["rs_universe"]),
-                             {"S&P 500", "KOSPI 200 + KOSDAQ 150"})
+                             {"S&P 500", "KOSPI + KOSDAQ 150"})
             self.assertTrue(all(hit["rs"] and 1 <= hit["rs"]["rating"] <= 99
                                 for hit in month["hits"]))
-            korea = [m for m in month["markets"] if m["id"] in {"kospi200", "kosdaq150"}]
-            self.assertTrue(all(m["rsUniverse"] == "KOSPI 200 + KOSDAQ 150" for m in korea))
+            korea = [m for m in month["markets"] if m["id"] in {"kospi", "kosdaq150"}]
+            self.assertTrue(all(m["rsUniverse"] == "KOSPI + KOSDAQ 150" for m in korea))
             self.assertTrue(all(m["rsUniverseSize"] == 2 for m in korea))
             report = (root / "report.html").read_text(encoding="utf-8")
             self.assertIn("월말 대비 수익률", report)
@@ -149,7 +149,7 @@ class CombinedTests(unittest.TestCase):
         frame.loc["2026-09-11", ["Close", "Adj Close"]] = 999
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            args = ["sp500_breakout.py", "--with-monthly", "--market", "sp500", "--tickers", "TEST",
+            args = ["sp500_breakout.py", "--min-turnover", "0", "--with-monthly", "--market", "sp500", "--tickers", "TEST",
                     "--ma", "3", "--lookback", "1", "--out", str(root / "d.csv"),
                     "--monthly-out", str(root / "m.csv"), "--html", str(root / "r.html")]
             with patch.object(sys, "argv", args), \
@@ -172,7 +172,7 @@ class CombinedTests(unittest.TestCase):
             paths = [root / "daily.csv", root / "monthly.csv", root / "report.html"]
             for path in paths:
                 path.write_text("prior successful report", encoding="utf-8")
-            args = ["sp500_breakout.py", "--with-monthly", "--market", "sp500",
+            args = ["sp500_breakout.py", "--min-turnover", "0", "--with-monthly", "--market", "sp500",
                     "--tickers", "TEST", "--ma", "3", "--date", "2026-09-13",
                     "--out", str(paths[0]), "--monthly-out", str(paths[1]), "--html", str(paths[2])]
             with patch.object(sys, "argv", args), \
@@ -185,7 +185,7 @@ class CombinedTests(unittest.TestCase):
                 self.assertEqual(path.read_text(encoding="utf-8"), "prior successful report")
 
     def test_same_csv_path_is_rejected_before_network(self):
-        args = ["sp500_breakout.py", "--with-monthly", "--out", "same.csv", "--monthly-out", "same.csv"]
+        args = ["sp500_breakout.py", "--min-turnover", "0", "--with-monthly", "--out", "same.csv", "--monthly-out", "same.csv"]
         with patch.object(sys, "argv", args), patch.object(screener, "download_prices") as download, \
              redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as exc:
             screener.main()
