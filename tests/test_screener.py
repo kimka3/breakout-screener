@@ -313,6 +313,22 @@ class MainTests(unittest.TestCase):
         self.assertIn("void loadPublicRim()", report)
         self.assertNotIn("Authorization: Basic", report)
 
+    def test_report_requests_public_us_rim_and_formats_dollar_values(self):
+        frame = price_frame([10, 10, 10, 12], [100, 100, 100, 200])
+        hit = screener.find_signals(frame, 3, 2, 2, "raw").iloc[0]
+        args = SimpleNamespace(ma=3, vol_window=2, vol_mult=2, lookback=1,
+                               price_basis="raw", no_hold=False, date=None,
+                               fundamentals_as_of="2026-09-21 10:00 KST")
+        chart = screener.build_series(
+            frame, hit, args, "AAPL", "Apple Inc.", "Technology", "sp500")
+        with redirect_stdout(io.StringIO()):
+            screener.write_html([chart], args, [{"id": "sp500"}], self.html)
+        report = self.html.read_text(encoding="utf-8")
+        self.assertIn('h.market === "sp500" ? "US" : "KR"', report)
+        self.assertIn('new URLSearchParams({ market, code })', report)
+        self.assertIn('currency === "USD" ? "$" + nf(value, 2)', report)
+        self.assertIn('Math.min(2, entries.length)', report)
+
     def test_nonpositive_or_nonfinite_numeric_options_are_rejected_before_download(self):
         for option, value in (("--ma", "0"), ("--ma", "-1"),
                               ("--vol-window", "0"), ("--lookback", "0"),
