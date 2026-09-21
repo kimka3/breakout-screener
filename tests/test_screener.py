@@ -328,6 +328,9 @@ class MainTests(unittest.TestCase):
         self.assertIn('new URLSearchParams({ market, code })', report)
         self.assertIn('currency === "USD" ? "$" + nf(value, 2)', report)
         self.assertIn('Math.min(2, entries.length)', report)
+        self.assertIn('미국 RIM 계산', report)
+        self.assertIn('if (market === "US" && (!requested', report)
+        self.assertIn('document.getElementById("screen-panel").addEventListener("click"', report)
 
     def test_nonpositive_or_nonfinite_numeric_options_are_rejected_before_download(self):
         for option, value in (("--ma", "0"), ("--ma", "-1"),

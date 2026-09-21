@@ -495,6 +495,11 @@ h1 {
 .rim-flag { padding: 2px 5px; border-radius: 999px; color: var(--accent); background: var(--accent-soft); }
 .rim-pending, .rim-error { color: var(--ink-3); font-size: 11px; }
 .rim-error { color: var(--down); }
+.rim-load {
+  margin-top: 8px; padding: 7px 10px; border: 1px solid var(--accent); border-radius: 8px;
+  color: var(--accent); background: transparent; font: 650 11px var(--font-sans); cursor: pointer;
+}
+.rim-load:hover { background: var(--accent-soft); }
 
 /* chart */
 .chart-head {
@@ -674,7 +679,7 @@ footer code {
       <li id="reading-basis"></li>
       <li><b>오닐식 RS(근사)</b>는 12개월 가격성과를 최근 3개월 40%, 그 이전 세 분기 각각 20%로 가중한 뒤 같은 국가의 추적 유니버스에서 1~99로 순위화합니다. 한국은 KOSPI(일평균 거래대금 30억원 이상)와 KOSDAQ 150을 합쳐 비교하고 미국은 S&amp;P 500 안에서 비교합니다. 전체 상장종목을 사용하는 공식 William O'Neil/IBD 유료 지표와는 범위가 다릅니다.</li>
       <li><b>PER</b>은 최근 12개월 실적 기준(trailing), <b>선행 PER</b>은 애널리스트 예상 실적 기준입니다. 최근 12개월이 적자면 trailing PER 이 성립하지 않아 <b>적자</b>로 표시되며, 이때는 선행 PER 만 참고할 수 있습니다. <b>국내 종목(KOSPI·KOSDAQ 150)은 데이터 제공처에 후행 PER 이 없어 대부분 선행 PER 만 표시됩니다.</b></li>
-      <li><b>RIM 적정가</b>는 한국·미국 돌파 종목에 표시합니다. 미국은 무료 API의 향후 2개년 EPS 컨센서스를 순이익으로 환산하고 3년차는 2% 성장으로 보정합니다. 적정가는 동일 전망에 초과이익 지속계수(ω) 0.60·0.75·0.95를 각각 적용한 주당가치 중 최솟값이며, 상승여력은 RIM 조회 시점 현재가를 기준으로 계산합니다. 돌파 판정 가격과 조회시점이 다를 수 있습니다.</li>
+      <li><b>RIM 적정가</b>는 한국·미국 돌파 종목에 표시합니다. 미국은 무료 API 한도를 보호하기 위해 관심 종목의 ‘미국 RIM 계산’을 누를 때 조회하며, 데이터 입력은 필요 없습니다. 향후 2개년 EPS 컨센서스를 순이익으로 환산하고 3년차는 2% 성장으로 보정합니다. 적정가는 동일 전망에 초과이익 지속계수(ω) 0.60·0.75·0.95를 각각 적용한 주당가치 중 최솟값이며, 상승여력은 RIM 조회 시점 현재가를 기준으로 계산합니다. 돌파 판정 가격과 조회시점이 다를 수 있습니다.</li>
     </ul>
     <h2>실행 예시</h2>
     <p><code id="run-command">python sp500_breakout.py --lookback 20 --html</code></p>
@@ -855,11 +860,16 @@ const rimDate = (value) => {
 function rimHTML(h) {
   if (!rimEligible(h)) return "";
   const rim = h.rim;
+  if (!rim && rimMarket(h) === "US") {
+    return `<section class="rim-box"><div class="rim-head"><strong>RIM 적정가</strong><span>무료 API · 종목당 최초 4회</span></div><button class="rim-load" type="button" data-rim-market="US" data-rim-code="${esc(String(h.ticker).toUpperCase())}">미국 RIM 계산</button></section>`;
+  }
   if (!rim || rim.status === "loading") {
     return `<section class="rim-box"><div class="rim-head"><strong>RIM 적정가</strong><span>ω 0.60·0.75·0.95 최솟값</span></div><p class="rim-pending">RIM Lab에서 계산 중…</p></section>`;
   }
   if (rim.status !== "ready") {
-    return `<section class="rim-box"><div class="rim-head"><strong>RIM 적정가</strong><span>ω 0.60·0.75·0.95 최솟값</span></div><p class="rim-error">현재 RIM 값을 불러오지 못했습니다.</p></section>`;
+    const retry = rimMarket(h) === "US"
+      ? `<button class="rim-load" type="button" data-rim-market="US" data-rim-code="${esc(String(h.ticker).toUpperCase())}">다시 계산</button>` : "";
+    return `<section class="rim-box"><div class="rim-head"><strong>RIM 적정가</strong><span>ω 0.60·0.75·0.95 최솟값</span></div><p class="rim-error">현재 RIM 값을 불러오지 못했습니다.</p>${retry}</section>`;
   }
   const value = rim.payload.valuation;
   const quality = rim.payload.quality || {};
@@ -884,8 +894,15 @@ function rimHTML(h) {
 function rimTableCells(h) {
   if (!rimEligible(h)) return '<td>—</td><td>—</td>';
   const rim = h.rim;
+  if (!rim && rimMarket(h) === "US") {
+    return `<td><button class="rim-load" type="button" data-rim-market="US" data-rim-code="${esc(String(h.ticker).toUpperCase())}">미국 RIM 계산</button></td><td>—</td>`;
+  }
   if (!rim || rim.status === "loading") return '<td>계산 중…</td><td>—</td>';
-  if (rim.status !== "ready") return '<td class="down">조회 실패</td><td>—</td>';
+  if (rim.status !== "ready") {
+    const retry = rimMarket(h) === "US"
+      ? `<button class="rim-load" type="button" data-rim-market="US" data-rim-code="${esc(String(h.ticker).toUpperCase())}">다시 계산</button>` : "";
+    return `<td class="down">조회 실패${retry}</td><td>—</td>`;
+  }
   const value = rim.payload.valuation;
   return `<td>${rimMoney(value.intrinsicValuePerShare, h, rim.payload)}<small class="table-date">현재가 ${rimMoney(value.currentPrice, h, rim.payload)} · ω ${nf(value.selectedOmega, 2)}</small></td>`
     + `<td class="${value.upsidePct >= 0 ? "up" : "down"}">${signedPct(value.upsidePct)}</td>`;
@@ -906,14 +923,15 @@ function scheduleRimRender() {
   rimRenderTimer = setTimeout(render, 80);
 }
 
-async function loadPublicRim() {
+async function loadPublicRim(requested = null) {
   const bySecurity = new Map();
   for (const screen of SCREENS) {
     for (const hit of screen.hits) {
       if (!rimEligible(hit)) continue;
-      if (hit.rim?.status === "ready") continue;
       const market = rimMarket(hit);
       const code = market === "US" ? String(hit.ticker).toUpperCase() : String(hit.ticker);
+      if (market === "US" && (!requested || requested.market !== market || requested.code !== code)) continue;
+      if (hit.rim?.status === "ready" || hit.rim?.status === "loading") continue;
       const key = market + ":" + code;
       hit.rim = { status: "loading" };
       if (!bySecurity.has(key)) bySecurity.set(key, { market, code, hits: [] });
@@ -947,6 +965,12 @@ async function loadPublicRim() {
   };
   await Promise.all(Array.from({ length: Math.min(2, entries.length) }, worker));
 }
+
+document.getElementById("screen-panel").addEventListener("click", event => {
+  const button = event.target.closest(".rim-load");
+  if (!button) return;
+  void loadPublicRim({ market: button.dataset.rimMarket, code: button.dataset.rimCode });
+});
 /* ---------- 시장 선택 ---------- */
 const marketRow = document.getElementById("market-row");
 function renderMarkets() {
