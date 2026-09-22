@@ -488,20 +488,26 @@ def download_prices(tickers, start, end, chunk=60, use_cache=True):
 
 
 def fetch_fundamentals(tickers):
-    """조건을 통과한 종목만 PER 등 기본 지표를 조회한다 (종목당 1회 요청)."""
+    """조건 통과 종목의 기본 지표와 Yahoo 현재가를 종목당 한 번 조회한다."""
     out = {}
     for i, t in enumerate(tickers, 1):
-        print(f"  PER 조회 {i}/{len(tickers)}", end="\r", flush=True)
+        print(f"  현재가·PER 조회 {i}/{len(tickers)}", end="\r", flush=True)
         try:
             info = yf.Ticker(t).info
+            current_price = _num(info.get("currentPrice"))
+            if current_price is None or current_price <= 0:
+                current_price = _num(info.get("regularMarketPrice"))
             out[t] = {
                 "per": info.get("trailingPE"),
                 "forward_per": info.get("forwardPE"),
                 "eps": info.get("trailingEps"),
                 "sector": info.get("sector") or "",
+                "quote_price": current_price if current_price and current_price > 0 else None,
+                "quote_as_of": _quote_as_of(info),
             }
         except Exception:
-            out[t] = {"per": None, "forward_per": None, "eps": None, "sector": ""}
+            out[t] = {"per": None, "forward_per": None, "eps": None, "sector": "",
+                      "quote_price": None, "quote_as_of": None}
     print(" " * 40, end="\r")
     return out
 
@@ -513,6 +519,28 @@ def _num(v):
     except (TypeError, ValueError):
         return None
     return None if pd.isna(f) or f in (float("inf"), float("-inf")) else round(f, 2)
+
+
+def _quote_as_of(info):
+    """Yahoo regularMarketTime을 거래소 현지 시각이 담긴 ISO 문자열로 바꾼다."""
+    raw = info.get("regularMarketTime")
+    try:
+        stamp = float(raw)
+        if not math.isfinite(stamp) or stamp <= 0:
+            return None
+        zone_name = info.get("exchangeTimezoneName") or "UTC"
+        return datetime.fromtimestamp(stamp, tz=ZoneInfo(zone_name)).isoformat(timespec="seconds")
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+
+
+def _quote_return(price, base):
+    """Yahoo 현재가의 신호일 실제 종가 대비 수익률. 확정 봉 수익률과 분리한다."""
+    quote = _num(price)
+    basis = _num(base)
+    if quote is None or quote <= 0 or basis is None or basis <= 0:
+        return None
+    return round((quote / basis - 1) * 100, 2)
 
 
 def _text(v):
@@ -771,7 +799,8 @@ def result_columns(args):
             "vol_ratio", "last_close", "last_signal_close", "last_above_ma_%",
             "return_since_%", "bars_since", "price_basis", *RS_CSV_COLUMNS,
             "per", "forward_per", "eps",
-            "fundamentals_as_of"]
+            "fundamentals_as_of", "quote_price", "quote_as_of",
+            "quote_return_since_%"]
 
 
 def main() -> int:
@@ -1081,6 +1110,9 @@ def main() -> int:
         r["per"] = _num(f.get("per"))
         r["forward_per"] = _num(f.get("forward_per"))
         r["eps"] = _num(f.get("eps"))
+        r["quote_price"] = _num(f.get("quote_price"))
+        r["quote_as_of"] = _text(f.get("quote_as_of")) or None
+        r["quote_return_since_%"] = _quote_return(r["quote_price"], r.get("close"))
         if not str(r.get("sector") or "").strip():
             r["sector"] = _text(f.get("sector"))
     for c in all_charts:
@@ -1088,6 +1120,9 @@ def main() -> int:
         c["per"] = _num(f.get("per"))
         c["forwardPer"] = _num(f.get("forward_per"))
         c["eps"] = _num(f.get("eps"))
+        c["quotePrice"] = _num(f.get("quote_price"))
+        c["quoteAsOf"] = _text(f.get("quote_as_of")) or None
+        c["quoteReturnPct"] = _quote_return(c["quotePrice"], c.get("close"))
         if not str(c.get("sector") or "").strip():
             c["sector"] = _text(f.get("sector"))
 

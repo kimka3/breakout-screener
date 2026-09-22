@@ -727,6 +727,21 @@ const priceBasis = (h = {}) => h.priceBasis || SCREEN.priceBasis || "raw";
 const priceLabel = (h = {}) => priceBasis(h) === "adj" ? "수정종가" : "종가";
 const signalClose = (h) => h.signalClose ?? h.close;
 const lastSignalClose = (h) => h.lastSignalClose ?? h.lastClose;
+const yahooQuotePrice = (h) => Number.isFinite(h.quotePrice) && h.quotePrice > 0 ? h.quotePrice : null;
+const quoteReturnPct = (h) => Number.isFinite(h.quoteReturnPct) ? h.quoteReturnPct : h.retPct;
+const quoteAsOfLabel = (h) => {
+  if (typeof h.quoteAsOf !== "string" || !h.quoteAsOf) return "조회시각 미상";
+  const stamp = new Date(h.quoteAsOf);
+  if (!Number.isFinite(stamp.getTime())) return h.quoteAsOf;
+  try {
+    return new Intl.DateTimeFormat("ko-KR", {
+      timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hour12: false,
+    }).format(stamp) + " KST";
+  } catch (_) {
+    return h.quoteAsOf;
+  }
+};
 const latestSignalPrice = (h) => {
   const value = h.latestSignalClose ?? (priceBasis(h) === "raw" ? h.latestClose : null);
   return Number.isFinite(value) && value > 0 && typeof h.latestDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(h.latestDate) ? value : null;
@@ -744,6 +759,23 @@ function priorMonthLabels(target, count) {
 const signalIndex = (h) => Number.isInteger(h.sigIndex) && h.sigIndex >= 0 && h.sigIndex < h.closes.length ? h.sigIndex : null;
 const rawPriceHTML = (chosen, raw, h) => Number.isFinite(chosen) && Number.isFinite(raw) && Math.abs(chosen - raw) > 0.00001
   ? `<small class="raw-price">실제 ${px(raw, h)}</small>` : "";
+function currentPriceHTML(h, fallbackChosen, fallbackRaw, fallbackDate) {
+  const quote = yahooQuotePrice(h);
+  if (quote !== null) {
+    return `<strong>${px(quote, h)}</strong><span class="table-date">Yahoo 가격시각 · ${esc(quoteAsOfLabel(h))}</span>`;
+  }
+  if (!Number.isFinite(fallbackChosen)) {
+    return `<strong>—</strong><span class="table-date">Yahoo 현재가 없음 · ${esc(fallbackDate || "—")}</span>`;
+  }
+  return `<strong>${px(fallbackChosen, h)}</strong><span class="table-date">확정 종가 · ${esc(fallbackDate || "—")}</span>`
+    + rawPriceHTML(fallbackChosen, fallbackRaw, h);
+}
+function currentCardPriceHTML(h, fallbackChosen, fallbackRaw) {
+  const quote = yahooQuotePrice(h);
+  if (quote !== null) return `<div class="v">${px(quote, h)}</div><small class="raw-price">Yahoo 가격시각 · ${esc(quoteAsOfLabel(h))}</small>`;
+  if (!Number.isFinite(fallbackChosen)) return `<div class="v">—</div><small class="raw-price">Yahoo 현재가 없음</small>`;
+  return `<div class="v">${px(fallbackChosen, h)}</div><small class="raw-price">확정 종가</small>${rawPriceHTML(fallbackChosen, fallbackRaw, h)}`;
+}
 let curMarket = screenStates.get(SCREEN.id).market;
 let sortKey = "date";
 
@@ -804,7 +836,7 @@ function configureScreen() {
   document.getElementById("f-hold").hidden = !monthly && !SCREEN.requireHold;
   document.getElementById("f-line3").textContent = monthly
     ? "판정 월 총거래량 > 직전 " + monthlyVolumeWindow() + "개월 월 총거래량의 평균 (같으면 제외)"
-    : "현재 종가도 " + SCREEN.maPeriod + "일선 위를 유지";
+    : "마지막 확정 종가도 " + SCREEN.maPeriod + "일선 위를 유지";
   document.getElementById("sort-vol").textContent = monthly ? "이격률순" : "거래량배수순";
   document.getElementById("reading-breakout").textContent = monthly
     ? "마지막 완료 월만 판정합니다. 그 직전 " + below + "개월은 각 월 종가가 당시의 " + maLabel() + "보다 모두 낮아야 하며, 판정 월 종가는 " + maLabel() + "보다 높아야 합니다. 선과 같은 값은 통과하지 않습니다."
@@ -815,19 +847,19 @@ function configureScreen() {
   const returnNote = document.getElementById("reading-return");
   returnNote.hidden = false;
   returnNote.textContent = monthly
-    ? "판정표의 현재가는 실행 시 확보한 최신 확정 일봉입니다. 월말 대비 수익률은 판정 월의 실제 종가와 최신 실제 종가로 계산하므로 배당·액면분할을 반영한 총수익률이 아닙니다."
-    : "현재 행의 ‘실제’ 퍼센트와 표의 ‘실제 종가 대비’는 돌파일 실제 종가 대비 현재 실제 종가의 등락률입니다. 수정종가를 표시한 경우에도 이 등락률에는 배당·액면분할을 반영하지 않습니다. 현재 이격은 표시된 가격 기준의 이동평균선 대비 값입니다.";
+    ? "현재가는 Yahoo currentPrice와 Yahoo 시장 기준시각을 별도로 표시합니다. 월말 대비 수익률은 판정 월의 실제 종가와 Yahoo 현재가로 계산하며, 배당·액면분할을 반영한 총수익률이 아닙니다. Yahoo 현재가가 없을 때만 최신 확정 일봉으로 대체합니다."
+    : "현재가는 Yahoo currentPrice와 Yahoo 시장 기준시각을 별도로 표시합니다. 돌파일 대비 수익률은 돌파일 실제 종가와 Yahoo 현재가로 계산하며, 배당·액면분할을 반영한 총수익률이 아닙니다. 이동평균과 이격은 마지막 확정 일봉 기준입니다.";
   document.getElementById("reading-hold").textContent = monthly
-    ? "진행 중인 월은 제외합니다. 월말 가격과 이격은 판정 월 기준이며, 판정표의 현재가는 날짜가 명시된 확정 일봉 종가입니다. 현재가는 선정 조건이나 돌파 유지 조건으로 사용하지 않습니다."
+    ? "진행 중인 월은 제외합니다. 월말 가격과 이격은 판정 월 기준이며, Yahoo 현재가는 참고용으로 선정 조건에 사용하지 않습니다."
     : SCREEN.requireHold
-      ? "현재 종가가 이동평균선 위인 종목만 포함합니다. 돌파 이후 한 번도 이탈하지 않았다는 뜻은 아닙니다. 현재 이격은 이동평균선 대비 값이며, 경과는 돌파로부터 지난 거래일 수입니다."
-      : "현재 종가가 이동평균선 아래인 종목도 포함합니다. 현재 이격은 이동평균선 대비 값이며, 경과는 돌파로부터 지난 거래일 수입니다.";
+      ? "마지막 확정 종가가 이동평균선 위인 종목만 포함합니다. Yahoo 현재가는 돌파 유지 판정에 사용하지 않습니다. 이격과 경과도 확정 일봉 기준입니다."
+      : "마지막 확정 종가가 이동평균선 아래인 종목도 포함합니다. Yahoo 현재가는 판정에 사용하지 않으며, 이격과 경과는 확정 일봉 기준입니다.";
   document.getElementById("reading-chart").textContent = monthly
     ? "차트는 판정 월까지의 완료된 월봉과 " + maLabel() + ", 월 총거래량입니다. 주황색 거래량 봉은 판정 월이며, 파란 점선·점은 별도로 표시한 최신종가입니다. 진행 중인 월봉을 추가하지 않습니다. 차트를 문지르면 월별 값을 볼 수 있고, 접힌 확인표에서 직전 " + below + "개월 가격과 직전 " + monthlyVolumeWindow() + "개월 거래량을 확인할 수 있습니다."
     : "차트의 주황색 거래량 봉이 돌파일입니다. 돌파일이 차트 구간 밖인 경우에는 강조 표시 없이 마지막 거래일 값을 보여줍니다. 차트를 손가락으로 문지르면 그날의 값이 표시됩니다.";
   document.getElementById("reading-basis").textContent = (SCREEN.priceBasis === "adj"
     ? "신호 판정은 수정주가 기준(분할·배당 반영)입니다."
-    : "신호 판정은 실제 종가 기준입니다.") + " 카드에 표시된 가격과 이동평균, 이격, 차트는 같은 가격 기준을 사용합니다. 수정종가와 실제 종가가 다르면 실제 종가를 작은 글씨로 함께 표시합니다.";
+    : "신호 판정은 실제 종가 기준입니다.") + " 돌파 가격과 이동평균, 이격, 차트는 같은 가격 기준을 사용합니다. Yahoo 현재가는 별도의 실제 시장가격이며 조회시각을 함께 표시합니다.";
   document.getElementById("reading-markets").textContent = SCREEN.markets.map(m => m.label).join(" · ")
     + (SCREEN.markets.length > 1 ? "을 스캔했습니다. 시장 탭으로 전환하세요. " : "을 스캔했습니다. ")
     + "시장·정렬·보기 선택은 각 스크리너에 따로 보관됩니다.";
@@ -835,7 +867,7 @@ function configureScreen() {
     + (SCREENS.some(s => s.timeframe === "month") ? " --with-monthly" : "") + " --html";
   const funda = document.getElementById("fundamentals-asof");
   funda.hidden = !SCREEN.fundamentalsAsOf;
-  funda.textContent = SCREEN.fundamentalsAsOf ? "PER·EPS 조회 시점 " + SCREEN.fundamentalsAsOf : "";
+  funda.textContent = SCREEN.fundamentalsAsOf ? "Yahoo 현재가·PER·EPS 조회 시점 " + SCREEN.fundamentalsAsOf : "";
   const historical = document.getElementById("historical-note");
   historical.hidden = !SCREEN.historicalAsOf;
   historical.textContent = SCREEN.historicalAsOf
@@ -1120,33 +1152,29 @@ function volumeAuditHTML(h) {
 function latestCloseHTML(h) {
   const chosen = latestSignalPrice(h);
   const date = typeof h.latestDate === "string" ? h.latestDate : "—";
-  if (chosen === null) return `<strong>—</strong><span class="table-date">선택 기준 종가 자료 없음 · ${esc(date)}</span>`
-    + (Number.isFinite(h.latestClose) ? `<small class="raw-price">실제 ${px(h.latestClose, h)}</small>` : "");
-  return `<strong>${px(chosen, h)}</strong><span class="table-date">${priceLabel(h)} · ${esc(date)} 확정 일봉</span>`
-    + rawPriceHTML(chosen, h.latestClose, h);
+  return currentPriceHTML(h, chosen, h.latestClose, date);
 }
 
 function monthlyCard(h, id) {
   const current = latestSignalPrice(h);
-  const currentPrice = current === null
-    ? `<div class="v">—</div>${Number.isFinite(h.latestClose) ? `<small class="raw-price">실제 ${px(h.latestClose, h)}</small>` : ""}`
-    : `<div class="v">${px(current, h)}</div>${rawPriceHTML(current, h.latestClose, h)}`;
-  const returnClass = Number.isFinite(h.retPct) ? (h.retPct >= 0 ? "up" : "down") : "dim";
+  const currentPrice = currentCardPriceHTML(h, current, h.latestClose);
+  const currentReturn = quoteReturnPct(h);
+  const returnClass = Number.isFinite(currentReturn) ? (currentReturn >= 0 ? "up" : "down") : "dim";
   return `<article class="card" tabindex="0" data-id="${id}">
     <div class="card-top"><span class="tkr">${esc(h.ticker)}</span><span class="co">${esc(h.name)}</span><span class="sig-date">${esc(dateLabel(h.date))}</span></div>
     <div class="metaline"><span class="sector">${esc(h.sector || (MK[h.market] || {}).label)}</span><span class="card-metrics"><span class="per">${perHTML(h)}</span></span></div>
     ${rsHTML(h)}
     <p class="monthly-note">판정 월 거래량 ${nf(h.volume, 0)} &gt; 직전 ${esc(monthlyVolumeWindow())}개월 평균 ${nf(h.avgVol)} · 평균 대비 ${Number.isFinite(h.volRatio) ? nf(h.volRatio) + "x" : "—"}</p>
     <div class="grid">
-      <div class="cell hd"></div><div class="cell hd">${priceLabel(h)}</div><div class="cell hd">${esc(maLabel())}</div><div class="cell hd">비교</div>
+      <div class="cell hd"></div><div class="cell hd">가격</div><div class="cell hd">${esc(maLabel())}</div><div class="cell hd">비교</div>
       <div class="cell rl">판정 월<span>${esc(dateLabel(h.date))}</span></div>
-      <div class="cell stack"><div class="v">${px(signalClose(h), h)}</div>${rawPriceHTML(signalClose(h), h.close, h)}</div>
+      <div class="cell stack"><div class="v">${px(signalClose(h), h)}</div><small class="raw-price">${priceLabel(h)}</small>${rawPriceHTML(signalClose(h), h.close, h)}</div>
       <div class="cell"><div class="v dim">${px(h.ma, h)}</div></div>
       <div class="cell stack"><div class="v up">+${nf(h.abovePct)}%</div><small class="raw-price">이평선 대비</small></div>
-      <div class="cell rl">현재<span>${esc(h.latestDate || "—")}</span></div>
+      <div class="cell rl">현재<span>${yahooQuotePrice(h) !== null ? "Yahoo" : esc(h.latestDate || "—")}</span></div>
       <div class="cell stack">${currentPrice}</div>
       <div class="cell"><div class="v dim">—</div></div>
-      <div class="cell stack"><div class="v ${returnClass}">${signedPct(h.retPct)}</div><small class="raw-price">월말 실제 종가 대비</small></div>
+      <div class="cell stack"><div class="v ${returnClass}">${signedPct(currentReturn)}</div><small class="raw-price">월말 실제 종가 대비</small></div>
     </div>
     ${h.lastTradingDate ? `<p class="monthly-note">판정 월 마지막 거래일 ${esc(h.lastTradingDate)}</p>` : ""}
     ${rimHTML(h)}
@@ -1165,6 +1193,7 @@ function card(h, id) {
   if (isMonthly()) return monthlyCard(h, id);
   const pct = Math.min(100, (h.volRatio / 6) * 100);
   const mark = Math.min(100, (SCREEN.volMult / 6) * 100);
+  const currentReturn = quoteReturnPct(h);
   return `
 <article class="card" tabindex="0" data-id="${id}">
   <div class="card-top">
@@ -1190,20 +1219,19 @@ function card(h, id) {
 
   <div class="grid">
     <div class="cell hd"></div>
-    <div class="cell hd">${priceLabel(h)}</div>
-    <div class="cell hd">MA${esc(SCREEN.maPeriod)}</div>
-    <div class="cell hd">이격</div>
+    <div class="cell hd">가격</div>
+    <div class="cell hd">확정 MA${esc(SCREEN.maPeriod)}</div>
+    <div class="cell hd">확정 이격</div>
 
     <div class="cell rl">돌파일<span>${esc(md(h.date))}</span></div>
-    <div class="cell stack"><div class="v">${px(signalClose(h), h)}</div>${rawPriceHTML(signalClose(h), h.close, h)}</div>
+    <div class="cell stack"><div class="v">${px(signalClose(h), h)}</div><small class="raw-price">${priceLabel(h)}</small>${rawPriceHTML(signalClose(h), h.close, h)}</div>
     <div class="cell"><div class="v dim">${px(h.ma, h)}</div></div>
     <div class="cell"><div class="v up">+${nf(h.abovePct)}%</div></div>
 
-    <div class="cell rl">현재<span>${esc(md(h.dates[h.dates.length - 1]))}${h.barsSince ? " +" + esc(h.barsSince) + "일" : ""}</span></div>
+    <div class="cell rl">현재<span>${yahooQuotePrice(h) !== null ? "Yahoo" : esc(md(h.dates[h.dates.length - 1]))}</span></div>
     <div class="cell stack">
-      <div class="v">${px(lastSignalClose(h), h)}</div>
-      ${rawPriceHTML(lastSignalClose(h), h.lastClose, h)}
-      <div class="chg ${h.retPct >= 0 ? "up" : "down"}" title="돌파일 실제 종가 대비">실제 ${h.retPct >= 0 ? "+" : ""}${nf(h.retPct)}%</div>
+      ${currentCardPriceHTML(h, lastSignalClose(h), h.lastClose)}
+      <div class="chg ${Number.isFinite(currentReturn) && currentReturn >= 0 ? "up" : "down"}" title="돌파일 실제 종가 대비">${signedPct(currentReturn)}</div>
     </div>
     <div class="cell"><div class="v dim">${px(h.lastMa, h)}</div></div>
     <div class="cell"><div class="v ${h.lastPct >= 0 ? "up" : "down"}">${h.lastPct >= 0 ? "+" : ""}${nf(h.lastPct)}%</div></div>
@@ -1239,14 +1267,14 @@ function readoutHTML(h, i, isSignal) {
 /* ---------- table ---------- */
 function table(hits) {
   if (isMonthly()) return `<div class="tablewrap"><table>
-    <thead><tr><th>판정 월</th><th>티커</th><th>오닐식 RS</th><th>RIM 적정가 / 기준가</th><th>RIM 상승여력</th><th>월말 가격 / 마지막 거래일</th><th>현재가 / 날짜</th><th>월말 대비 수익률</th><th>${esc(maLabel())}</th><th>이격</th><th>월 총거래량</th><th>직전 ${esc(monthlyVolumeWindow())}개월 평균</th><th>평균 대비</th><th>거래량 확인</th><th>직전 ${esc(SCREEN.belowMonths || 6)}개월</th><th>PER</th><th>선행 PER</th></tr></thead>
+    <thead><tr><th>판정 월</th><th>티커</th><th>오닐식 RS</th><th>RIM 적정가 / 기준가</th><th>RIM 상승여력</th><th>월말 가격 / 마지막 거래일</th><th>Yahoo 현재가 / 조회시각</th><th>월말 대비 수익률</th><th>${esc(maLabel())}</th><th>이격</th><th>월 총거래량</th><th>직전 ${esc(monthlyVolumeWindow())}개월 평균</th><th>평균 대비</th><th>거래량 확인</th><th>직전 ${esc(SCREEN.belowMonths || 6)}개월</th><th>PER</th><th>선행 PER</th></tr></thead>
     <tbody>${hits.map(h => `<tr>
       <td>${esc(dateLabel(h.date))}</td><td class="sym">${esc(h.ticker)}</td>
       ${rsTableCell(h)}
       ${rimTableCells(h)}
       <td>${px(signalClose(h), h)}<small class="table-date">${priceLabel(h)}${h.lastTradingDate ? " · " + esc(h.lastTradingDate) : ""}</small>${rawPriceHTML(signalClose(h), h.close, h)}</td>
       <td>${latestCloseHTML(h)}</td>
-      <td class="${Number.isFinite(h.retPct) ? (h.retPct >= 0 ? "up" : "down") : ""}">${signedPct(h.retPct)}<small class="table-date">실제 종가 기준</small></td>
+      <td class="${Number.isFinite(quoteReturnPct(h)) ? (quoteReturnPct(h) >= 0 ? "up" : "down") : ""}">${signedPct(quoteReturnPct(h))}<small class="table-date">월말 실제 종가 대비</small></td>
       <td>${px(h.ma, h)}</td><td class="up">+${nf(h.abovePct)}%</td>
       <td>${nf(h.volume, 0)}</td><td>${nf(h.avgVol)}</td><td>${Number.isFinite(h.volRatio) ? nf(h.volRatio) + "x" : "—"}</td>
       <td>${volumeAuditHTML(h)}</td>
@@ -1257,7 +1285,7 @@ function table(hits) {
   return `<div class="tablewrap"><table>
   <thead><tr>
     <th>돌파일</th><th>티커</th><th>오닐식 RS</th><th>RIM 적정가 / 기준가</th><th>RIM 상승여력</th><th>돌파 가격</th><th>배수</th>
-    <th>현재 가격 / 거래일</th><th>실제 종가 대비</th><th>MA${esc(SCREEN.maPeriod)}</th><th>현재 이격</th><th>경과</th>
+    <th>Yahoo 현재가 / 조회시각</th><th>돌파일 대비</th><th>확정 MA${esc(SCREEN.maPeriod)}</th><th>확정 이격</th><th>경과</th>
     <th>PER</th><th>선행 PER</th>
   </tr></thead>
   <tbody>${hits.map(h => `<tr>
@@ -1267,8 +1295,8 @@ function table(hits) {
     ${rimTableCells(h)}
     <td>${px(signalClose(h), h)}<small class="table-date">${priceLabel(h)}</small>${rawPriceHTML(signalClose(h), h.close, h)}</td>
     <td class="hot">${nf(h.volRatio)}x</td>
-    <td>${px(lastSignalClose(h), h)}<small class="table-date">${esc(h.dates[h.dates.length - 1])}</small>${rawPriceHTML(lastSignalClose(h), h.lastClose, h)}</td>
-    <td class="${h.retPct >= 0 ? "up" : "down"}">${h.retPct >= 0 ? "+" : ""}${nf(h.retPct)}%</td>
+    <td>${currentPriceHTML(h, lastSignalClose(h), h.lastClose, h.dates[h.dates.length - 1])}</td>
+    <td class="${Number.isFinite(quoteReturnPct(h)) && quoteReturnPct(h) >= 0 ? "up" : "down"}">${signedPct(quoteReturnPct(h))}</td>
     <td style="color:var(--ink-2)">${px(h.lastMa, h)}</td>
     <td class="${h.lastPct >= 0 ? "up" : "down"}">${h.lastPct >= 0 ? "+" : ""}${nf(h.lastPct)}%</td>
     <td style="font-size:11px;color:var(--ink-3)">${esc(h.barsSince)}일</td>

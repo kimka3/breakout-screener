@@ -52,6 +52,31 @@ def report_payload(path):
         html[start:].lstrip())[0]
 
 
+class FundamentalsTests(unittest.TestCase):
+    def test_fetch_fundamentals_keeps_yahoo_current_price_and_market_timestamp(self):
+        info = {
+            "currentPrice": 82.5,
+            "regularMarketPrice": 81.0,
+            "regularMarketTime": 1790020802,
+            "exchangeTimezoneName": "America/New_York",
+            "trailingPE": 12.3,
+        }
+        with patch.object(screener.yf, "Ticker", return_value=SimpleNamespace(info=info)), \
+             redirect_stdout(io.StringIO()):
+            result = screener.fetch_fundamentals(["DAL"])["DAL"]
+        self.assertEqual(result["quote_price"], 82.5)
+        self.assertEqual(result["quote_as_of"], "2026-09-21T16:00:02-04:00")
+        self.assertEqual(result["per"], 12.3)
+
+    def test_fetch_fundamentals_falls_back_to_regular_market_price(self):
+        info = {"currentPrice": float("nan"), "regularMarketPrice": 236.42}
+        with patch.object(screener.yf, "Ticker", return_value=SimpleNamespace(info=info)), \
+             redirect_stdout(io.StringIO()):
+            result = screener.fetch_fundamentals(["CRM"])["CRM"]
+        self.assertEqual(result["quote_price"], 236.42)
+        self.assertIsNone(result["quote_as_of"])
+
+
 class SignalTests(unittest.TestCase):
     def signals(self, frame, basis="adj", hold=True):
         return screener.find_signals(frame, 3, 2, 2.0, basis, require_hold=hold)
@@ -170,14 +195,15 @@ class MainTests(unittest.TestCase):
         self.html = self.root / "report.html"
         self.summary = self.root / "summary.txt"
 
-    def run_main(self, prices, extra=()):
+    def run_main(self, prices, extra=(), fundamentals_data=None):
         argv = ["sp500_breakout.py", "--market", "sp500", "--tickers", "TEST",
                 "--ma", "3", "--vol-window", "2", "--lookback", "5",
                 "--date", "2026-08-31", "--out", str(self.csv),
                 "--html", str(self.html), "--summary", str(self.summary), *extra]
         with patch.object(sys, "argv", argv), \
              patch.object(screener, "download_prices", return_value=prices) as download, \
-             patch.object(screener, "fetch_fundamentals", return_value={}) as fundamentals, \
+             patch.object(screener, "fetch_fundamentals",
+                          return_value=fundamentals_data or {}) as fundamentals, \
              redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             download.last_failed = []
             result = screener.main()
@@ -278,6 +304,30 @@ class MainTests(unittest.TestCase):
         self.assertTrue(payload["fundamentalsAsOf"])
         self.assertNotEqual(payload["fundamentalsAsOf"], payload["historicalAsOf"])
         fundamentals.assert_called_once_with(["TEST"])
+
+    def test_main_exports_yahoo_quote_without_replacing_confirmed_bar_fields(self):
+        frame = price_frame([20, 20, 20, 24, 18, 26],
+                            [100, 100, 100, 200, 100, 500], factors=[0.5] * 6)
+        quote = {"TEST": {
+            "quote_price": 30,
+            "quote_as_of": "2026-09-01T16:00:00-04:00",
+        }}
+        code, _ = self.run_main({"TEST": frame}, extra=("--lookback", "1"),
+                                fundamentals_data=quote)
+        self.assertEqual(code, 0)
+        csv = pd.read_csv(self.csv)
+        self.assertEqual(csv.iloc[0]["last_close"], 26)
+        self.assertEqual(csv.iloc[0]["return_since_%"], 0)
+        self.assertEqual(csv.iloc[0]["quote_price"], 30)
+        self.assertEqual(csv.iloc[0]["quote_return_since_%"], 15.38)
+        hit = report_payload(self.html)["hits"][0]
+        self.assertEqual(hit["lastClose"], 26)
+        self.assertEqual(hit["quotePrice"], 30)
+        self.assertEqual(hit["quoteAsOf"], quote["TEST"]["quote_as_of"])
+        self.assertEqual(hit["quoteReturnPct"], 15.38)
+        html = self.html.read_text(encoding="utf-8")
+        self.assertIn("Yahoo 현재가", html)
+        self.assertIn("quoteAsOfLabel", html)
 
     def test_report_preserves_source_metadata_and_escapes_script_terminators(self):
         frame = price_frame([10, 10, 10, 12], [100, 100, 100, 200])

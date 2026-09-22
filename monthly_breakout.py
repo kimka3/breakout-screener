@@ -45,7 +45,8 @@ def monthly_result_columns():
             "return_since_%", "bars_since", "latest_date", "latest_close",
             "latest_signal_close", "price_basis", *RS_CSV_COLUMNS,
             "per", "forward_per", "eps",
-            "fundamentals_as_of"]
+            "fundamentals_as_of", "quote_price", "quote_as_of",
+            "quote_return_since_%"]
 
 
 def _text(value):
