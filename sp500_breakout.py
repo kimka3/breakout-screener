@@ -369,18 +369,21 @@ def drop_partial_bar(df, market: str):
 # --------------------------------------------------------------------------
 # 2. 시세 다운로드
 # --------------------------------------------------------------------------
-def download_prices(tickers, start, end, chunk=60, use_cache=True):
+def price_cache_path(tickers, start, end):
+    key = hashlib.md5(
+        f"priced-sessions-v2|{start}|{end}|{','.join(sorted(tickers))}".encode()
+    ).hexdigest()[:12]
+    return CACHE_DIR / f"prices_{key}.pkl"
+
+
+def download_prices(tickers, start, end, chunk=60, use_cache=True, threads=True):
     """티커별 OHLCV DataFrame(dict) 반환.
 
     묶음으로 두 번 받아보고, 그래도 빠진 종목은 개별 요청으로 한 번 더 시도한다.
     """
     cache_path = None
     if use_cache:
-        key = hashlib.md5(
-            # Old caches removed priced sessions whose volume was missing.
-            f"priced-sessions-v2|{start}|{end}|{','.join(sorted(tickers))}".encode()
-        ).hexdigest()[:12]
-        cache_path = CACHE_DIR / f"prices_{key}.pkl"
+        cache_path = price_cache_path(tickers, start, end)
         if cache_path.exists() and (time.time() - cache_path.stat().st_mtime) < 6 * 3600:
             try:
                 with cache_path.open("rb") as fh:
@@ -414,7 +417,7 @@ def download_prices(tickers, start, end, chunk=60, use_cache=True):
                     auto_adjust=False,
                     actions=False,
                     group_by="ticker",
-                    threads=True,
+                    threads=threads,
                     progress=False,
                 )
             except Exception:
@@ -485,6 +488,82 @@ def download_prices(tickers, start, end, chunk=60, use_cache=True):
         except Exception:
             pass
     return out
+
+
+def missing_price_sessions(prices, window, since=None):
+    """Peer-observed sessions; never manufacture weekdays or fill missing prices.
+
+    Include the moving-average warmup, not just the signal search window. A
+    session absent from every supplied security is not detectable by this check.
+    """
+    if not prices:
+        return {}
+    counts = Counter()
+    dates = {}
+    for ticker, frame in prices.items():
+        if frame.empty:
+            continue
+        index = frame.index
+        if index.tz is not None:
+            index = index.tz_localize(None)
+        dates[ticker] = set(index.normalize())
+        counts.update(dates[ticker])
+    quorum = max(min(5, len(dates)), int(len(dates) * 0.03), 1)
+    calendar = sorted(day for day, count in counts.items() if count >= quorum)
+    required = set(calendar[-window:])
+    if since is not None:
+        required.update(day for day in calendar if day >= pd.Timestamp(since))
+    return {ticker: sorted(day for day in required - have if day >= min(have))
+            for ticker, have in dates.items()
+            if any(day >= min(have) for day in required - have)}
+
+
+def recover_price_sessions(prices, market, start, end, window, since=None, price_basis="adj"):
+    """One bounded, uncached, serial retry for nonempty but incomplete feeds.
+
+    Replace the whole history only after all known required sessions return.
+    Splicing a new adjusted-price fragment into an old adjustment basis is unsafe.
+    """
+    gaps = missing_price_sessions(prices, window, since)
+    if not gaps:
+        return prices, {"detected": 0, "repaired": 0, "remaining": 0, "missingDates": []}
+    missing_dates = sorted({day.date().isoformat() for days in gaps.values() for day in days})
+    print(f"[{MARKETS[market]['label']}] 누락 이력 {len(gaps)}종목 재수집 · "
+          f"날짜: {', '.join(missing_dates[:8])}", flush=True)
+    fresh = download_prices(list(gaps), start, end, chunk=20, use_cache=False, threads=False)
+    repaired = dict(prices)
+    count = 0
+    for ticker, days in gaps.items():
+        frame = fresh.get(ticker)
+        if frame is None or frame.empty:
+            continue
+        frame = drop_partial_bar(frame, market).sort_index()
+        index = frame.index.tz_localize(None) if frame.index.tz is not None else frame.index
+        frame = frame.copy()
+        frame.index = index.normalize()
+        frame = frame.loc[(frame.index >= pd.Timestamp(start)) & (frame.index <= pd.Timestamp(end))]
+        if frame.index.has_duplicates or frame.index.hasnans:
+            continue
+        old_index = prices[ticker].index
+        if old_index.tz is not None:
+            old_index = old_index.tz_localize(None)
+        required = set(old_index.normalize()) | set(days)
+        if not required.issubset(set(frame.index)):
+            continue
+        # A dated all-null/invalid row is not a recovered session.
+        if any(column not in frame or not (
+                pd.to_numeric(frame.loc[sorted(required), column], errors="coerce")
+                .map(lambda value: pd.notna(value) and math.isfinite(value) and value > 0).all())
+               for column in (["Open", "High", "Low", "Close"]
+                              + (["Adj Close"] if price_basis == "adj" else []))):
+            continue
+        repaired[ticker] = frame
+        count += 1
+    remaining = missing_price_sessions(repaired, window, since)
+    print(f"[{MARKETS[market]['label']}] 누락 이력 복구 {count}/{len(gaps)}종목 · "
+          f"재검사 잔여 {len(remaining)}종목", flush=True)
+    return repaired, {"detected": len(gaps), "repaired": count,
+                      "remaining": len(remaining), "missingDates": missing_dates}
 
 
 def fetch_fundamentals(tickers):
@@ -893,6 +972,8 @@ def main() -> int:
         # Monthly charts also show the latest completed daily close. Remove the
         # in-progress daily bar before either strategy consumes the same feed.
         prices = {t: drop_partial_bar(df, mk) for t, df in prices.items()}
+        downloaded_prices = prices
+        download_tickers = meta["yahoo"].tolist()
 
         # 지수 편입 명단 대신 시장 전체를 받는 경우, 하루 몇 천만 원어치만
         # 거래되는 종목이 섞인다. 그런 종목은 '직전 평균 거래량의 2배' 가 몇 백
@@ -909,6 +990,23 @@ def main() -> int:
                       f"{n_thin}종목 제외 — {len(liquid)}종목 스캔")
             prices = liquid
             meta = meta[meta["yahoo"].isin(prices)].reset_index(drop=True)
+
+        # Validate and recover before monthly bars, RS, or daily signals consume
+        # the data. Nonempty responses and cache hits can still omit sessions.
+        monthly_as_of = end_date if args.date else datetime.now(ZoneInfo(spec["tz"]))
+        monthly_since = ((pd.Period(pd.Timestamp(monthly_as_of).date(), freq="M") - 16)
+                         .start_time if args.with_monthly else None)
+        quality_window = max(args.ma, args.vol_window) + args.lookback + 1
+        prices, recovery = recover_price_sessions(
+            prices, mk, start_date, end_date, quality_window, monthly_since, args.price_basis)
+        if recovery["repaired"] and not args.no_cache:
+            try:
+                downloaded_prices.update(prices)
+                CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                with price_cache_path(download_tickers, start_date, end_date).open("wb") as fh:
+                    pickle.dump(downloaded_prices, fh)
+            except OSError as exc:
+                print(f"[warn] 복구 시세 캐시 저장 실패: {exc}", file=sys.stderr)
 
         rs_frames.update({(mk, ticker): frame for ticker, frame in prices.items()
                           if isinstance(frame, pd.DataFrame) and not frame.empty})
@@ -974,23 +1072,8 @@ def main() -> int:
         # 빠진 날이 검색 구간 안에 있으면 "전일 아래 → 당일 위" 가 실제로는
         # 없었는데 있는 것처럼 보여 가짜 돌파가 만들어진다. 놓치는 것보다 나쁘다.
         # 전 종목의 날짜 분포로 그 시장의 거래일 달력을 만들어 대조한다.
-        day_count = Counter()
-        for df in prices.values():
-            day_count.update(df.index.normalize())
-        # 기준은 "다수결"이 아니라 "존재 증거"다. 어느 날짜가 소수 종목에만
-        # 있더라도 그건 실제 거래일이고, 없는 쪽이 결손이다. 다수결로 잡으면
-        # 결손이 광범위할 때 그 날짜가 달력에서 통째로 사라져 탐지가 무력해진다.
-        # 같은 시장의 서로 다른 종목 여러 개가 같은 날짜를 갖고 있다면 실제 거래일이다.
-        # 기준을 높이면 결손이 심할수록 그 날짜가 달력에서 사라져 탐지가 무력해진다.
-        quorum = max(5, int(len(prices) * 0.03))
-        calendar = sorted(d for d, n in day_count.items() if n >= quorum)
-        check_days = calendar[-(args.lookback + args.vol_window + 2):]
-        gapped = []
-        for t, df in prices.items():
-            have = set(df.index.normalize())
-            first = df.index.min()
-            if any(d not in have for d in check_days if d >= first):
-                gapped.append(t)
+        gaps = missing_price_sessions(prices, quality_window)
+        gapped = list(gaps)
 
         degraded = len(gapped) > len(prices) * 0.2
         if gapped and not degraded:
@@ -998,16 +1081,14 @@ def main() -> int:
             print(f"[{spec['label']}] 거래일 누락으로 제외 {len(gapped)}종목: {sample}")
             prices = {t: df for t, df in prices.items() if t not in set(gapped)}
         elif degraded:
-            # 이 정도면 종목이 아니라 실행 환경의 문제다. 개별 제외는 의미가 없고
-            # (대부분이 빠진다) 그대로 두면 없던 교차가 신호로 잡힌다. 결과 전체에
-            # 신뢰 불가 표시를 단다.
-            miss = sorted({d.date().isoformat() for t in gapped
-                           for d in check_days if d not in set(prices[t].index.normalize())})
+            miss = sorted({d.date().isoformat() for days in gaps.values() for d in days})
             print(f"[{spec['label']}] ★ 거래일 결손이 광범위합니다: "
                   f"{len(gapped)}/{len(prices)}종목. 빠진 날짜: {', '.join(miss[:5])}"
                   + (" ..." if len(miss) > 5 else ""), file=sys.stderr)
             print(f"[{spec['label']}] ★ 없던 교차가 신호로 잡힐 수 있어 이 결과는 "
-                  f"신뢰할 수 없습니다.", file=sys.stderr)
+                  f"게시하지 않습니다.", file=sys.stderr)
+            scan_errors.append(spec["label"] + " 일봉")
+            continue
 
         last_dates = Counter(df.index.max().normalize() for df in prices.values())
         latest, n_at_latest = last_dates.most_common(1)[0]
@@ -1070,6 +1151,7 @@ def main() -> int:
             "noHistory": n_no_hist,
             "shortHistory": len(short),
             "gapped": len(gapped),
+            "recovery": recovery,
             "degraded": bool(degraded),
             "stale": n_stale,
             "hits": len(rows) - n_before,
