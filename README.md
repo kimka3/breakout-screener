@@ -155,27 +155,25 @@ python sp500_breakout.py --lookback 20 --html
 
 ## 자동 실행
 
-GitHub Actions 가 매일 `21:57 UTC`(= 다음날 `06:57 KST`)에 스크리너 실행을 예약해
-두 스크리너를 실행하고 결과를 `gh-pages` 브랜치로 배포합니다. PC 를 켜두지 않아도 갱신됩니다. 장기 시트의 기준월은 새 달이 시작될 때 다음 확정 월봉으로 바뀝니다.
+Vultr VPS의 systemd timer가 매일 `22:20 UTC`(= 다음날 `07:20 KST`)에
+GitHub Actions의 `workflow_dispatch`를 호출합니다. GitHub Actions가 두 스크리너를
+실행하고 결과를 `gh-pages` 브랜치로 배포하므로 PC를 켜두지 않아도 갱신됩니다.
+장기 시트의 기준월은 새 달이 시작될 때 다음 확정 월봉으로 바뀝니다.
 
 - 워크플로: `.github/workflows/daily-schedule.yml`
 - 결과 페이지: https://kimka3.github.io/breakout-screener/
 - 수동 실행: 저장소 **Actions** 탭 → **Daily breakout screen** → **Run workflow**
 
 예약 시각은 미국장 정규장 마감(서머타임에는 05:00 KST, 겨울에는 06:00 KST) 이후,
-한국장 개장(09:00 KST) 이전입니다. 실제 시작은 GitHub 대기열에 따라 늦어질 수 있으므로
-06:57 실행이나 개장 전 갱신을 보장하지 않습니다. 데이터 공급자의 갱신 시각도 별개이므로
+한국장 개장(09:00 KST) 이전입니다. 데이터 공급자의 갱신 시각은 별개이므로
 리포트의 **기준 거래일과 생성 시각**을 함께 확인해야 합니다.
-
-분 단위를 정각에서 어긋내 둔 것은 의도적입니다. GitHub 예약 실행은 정각에
-요청이 몰려 대기열이 길어지고, 그만큼 실제 실행이 밀립니다.
 
 ### Vultr VPS 정시 트리거
 
 GitHub `schedule` 이벤트 자체가 늦게 생성되는 경우에는 유료 러너로도 해결되지
-않습니다. `ops/vultr/`에는 VPS의 systemd timer가 매일 `22:20 UTC`(다음날
-`07:20 KST`)에 기존 `workflow_dispatch`를 호출하는 설치 파일이 있습니다. 실제
-스크리닝·테스트·Pages 배포는 계속 GitHub Actions에서 수행합니다.
+않습니다. `ops/vultr/`의 systemd timer가 매일 `22:20 UTC`(다음날
+`07:20 KST`)에 `workflow_dispatch`를 호출합니다. 실제 스크리닝·테스트·Pages
+배포는 계속 GitHub Actions에서 수행합니다.
 
 GitHub Fine-grained personal access token은 이 저장소만 선택하고 **Actions:
 Read and write** 권한만 부여합니다. 토큰은 저장소에 커밋하지 않고 VPS의
@@ -196,10 +194,9 @@ journalctl -u breakout-trigger.service --since today
 
 타이머가 늦게 깨어나더라도 한국장 장중 가격으로 보고서를 덮어쓰지 않도록
 `07:00~08:49 KST` 밖에서는 호출을 건너뜁니다. `Persistent=false`라 VPS가
-꺼져 있던 동안의 실행도 나중에 보충하지 않습니다. VPS 타이머가 한 차례 정상
-호출된 것을 확인한 뒤에만 `.github/workflows/daily-schedule.yml`의 `schedule`
-항목을 제거하고 `workflow_dispatch`만 유지합니다. 그 전에는 기존 예약을 장애
-대비용으로 남겨 둡니다.
+꺼져 있던 동안의 실행도 나중에 보충하지 않습니다. 2026-09-29 실제 호출에서
+단위 테스트·스크리닝·Pages 배포·텔레그램 알림까지 성공한 뒤 GitHub의
+`schedule` 항목을 제거했으며, `workflow_dispatch`만 유지합니다.
 
 예약 실행은 먼저 오프라인 단위 테스트를 통과한 뒤 시세를 수집합니다. HTML·CSV·요약 파일이 비어 있지 않은지 확인하고 배포합니다. 조건 충족 종목이 0건이어도 CSV는 헤더를 포함해 생성합니다. 반면 선택한 시장 중 하나라도 평가할 수 있는 시세가 전혀 없으면 실행을 실패 처리하고 새 결과를 배포하지 않습니다.
 
