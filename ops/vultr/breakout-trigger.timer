@@ -1,0 +1,13 @@
+[Unit]
+Description=Run breakout-screener before the Korean market opens
+
+[Timer]
+# 22:20 UTC is 07:20 KST on the following calendar day.
+OnCalendar=*-*-* 22:20:00 UTC
+AccuracySec=30s
+RandomizedDelaySec=0
+Persistent=false
+Unit=breakout-trigger.service
+
+[Install]
+WantedBy=timers.target

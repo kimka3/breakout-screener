@@ -170,6 +170,37 @@ GitHub Actions 가 매일 `21:57 UTC`(= 다음날 `06:57 KST`)에 스크리너 �
 분 단위를 정각에서 어긋내 둔 것은 의도적입니다. GitHub 예약 실행은 정각에
 요청이 몰려 대기열이 길어지고, 그만큼 실제 실행이 밀립니다.
 
+### Vultr VPS 정시 트리거
+
+GitHub `schedule` 이벤트 자체가 늦게 생성되는 경우에는 유료 러너로도 해결되지
+않습니다. `ops/vultr/`에는 VPS의 systemd timer가 매일 `22:20 UTC`(다음날
+`07:20 KST`)에 기존 `workflow_dispatch`를 호출하는 설치 파일이 있습니다. 실제
+스크리닝·테스트·Pages 배포는 계속 GitHub Actions에서 수행합니다.
+
+GitHub Fine-grained personal access token은 이 저장소만 선택하고 **Actions:
+Read and write** 권한만 부여합니다. 토큰은 저장소에 커밋하지 않고 VPS의
+`/etc/breakout-screener.env`에 `0600` 권한으로 저장됩니다.
+
+```bash
+git clone https://github.com/kimka3/breakout-screener.git
+cd breakout-screener
+sudo bash ops/vultr/install.sh
+```
+
+설치 확인 명령은 다음과 같습니다.
+
+```bash
+systemctl list-timers breakout-trigger.timer
+journalctl -u breakout-trigger.service --since today
+```
+
+타이머가 늦게 깨어나더라도 한국장 장중 가격으로 보고서를 덮어쓰지 않도록
+`07:00~08:49 KST` 밖에서는 호출을 건너뜁니다. `Persistent=false`라 VPS가
+꺼져 있던 동안의 실행도 나중에 보충하지 않습니다. VPS 타이머가 한 차례 정상
+호출된 것을 확인한 뒤에만 `.github/workflows/daily-schedule.yml`의 `schedule`
+항목을 제거하고 `workflow_dispatch`만 유지합니다. 그 전에는 기존 예약을 장애
+대비용으로 남겨 둡니다.
+
 예약 실행은 먼저 오프라인 단위 테스트를 통과한 뒤 시세를 수집합니다. HTML·CSV·요약 파일이 비어 있지 않은지 확인하고 배포합니다. 조건 충족 종목이 0건이어도 CSV는 헤더를 포함해 생성합니다. 반면 선택한 시장 중 하나라도 평가할 수 있는 시세가 전혀 없으면 실행을 실패 처리하고 새 결과를 배포하지 않습니다.
 
 `push`와 `pull_request`에서는 `.github/workflows/tests.yml`이 단위 테스트만 실행합니다. 이 검증에서는 시세 스캔, Pages 배포, 텔레그램 알림을 실행하지 않습니다. 로컬에서도 동일하게 확인할 수 있습니다.
