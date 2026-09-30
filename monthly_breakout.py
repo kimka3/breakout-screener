@@ -194,7 +194,8 @@ def _chart(monthly, row, audit, volume_audit, yahoo):
     }
 
 
-def scan_monthly_market(prices, meta, market, as_of, price_basis="adj"):
+def scan_monthly_market(prices, meta, market, as_of, price_basis="adj", *,
+                        target_month=None, expected_last_session=None):
     """Return (CSV rows, chart payloads, market quality summary), without I/O.
 
     Screening requires 16 consecutive completed calendar months. Every observed
@@ -205,12 +206,20 @@ def scan_monthly_market(prices, meta, market, as_of, price_basis="adj"):
     of the preceding three complete monthly totals. Latest daily quotes are
     separate display fields and never change the completed-month predicate.
     Bad securities are excluded, counted, and never replaced by an older signal.
+    Live callers supply an exchange-calendar target and final session. Date-only
+    historical callers retain the previous-calendar-month convention.
     """
     if market not in MARKET_DISPLAY:
         raise ValueError(f"unsupported market: {market}")
     if price_basis not in ("adj", "raw"):
         raise ValueError("price_basis must be adj or raw")
-    target = last_completed_month(as_of)
+    target = (last_completed_month(as_of) if target_month is None
+              else pd.Period(target_month, freq="M"))
+    expected_last = (None if expected_last_session is None
+                     else pd.Timestamp(expected_last_session).normalize())
+    if expected_last is not None and (expected_last.tzinfo is not None
+                                     or expected_last.to_period("M") != target):
+        raise ValueError("expected last session must be a naive date in target month")
     required_months = pd.period_range(target - (REQUIRED_MONTHS - 1), target, freq="M")
     previous_months = pd.period_range(target - BELOW_MONTHS, target - 1, freq="M")
     volume_months = pd.period_range(target - VOLUME_MONTHS, target - 1, freq="M")
@@ -255,6 +264,11 @@ def scan_monthly_market(prices, meta, market, as_of, price_basis="adj"):
         "degraded": False, "hits": 0, "calendarSource": "peer-observed daily sessions",
         "calendarQuorum": quorum, "calendarPeers": len(prepared), "exclusions": {},
     }
+    # Peer dates alone cannot detect the final session missing from EVERY feed.
+    # Do not label a partial new month complete or fall back to the older month.
+    if expected_last is not None:
+        summary["expectedLastTradingDate"] = expected_last.date().isoformat()
+        summary["degraded"] = expected_last not in target_days
     rows, charts = [], []
 
     def exclude(yahoo, kind, detail):
@@ -272,6 +286,11 @@ def scan_monthly_market(prices, meta, market, as_of, price_basis="adj"):
         daily = prepared[yahoo]
         if daily.empty or daily.index[0].to_period("M") > required_months[0]:
             exclude(yahoo, "noHistory", "fewer than 16 consecutive completed months")
+            continue
+        if expected_last is not None and expected_last not in daily.index:
+            summary["stale"] += 1
+            exclude(yahoo, "gapped", "missing final exchange session: "
+                    + expected_last.date().isoformat())
             continue
         absent_calendar = [str(month) for month, days in period_days.items() if not days]
         if absent_calendar:
@@ -358,5 +377,6 @@ def scan_monthly_market(prices, meta, market, as_of, price_basis="adj"):
         charts.append(_chart(monthly, row, audit, volume_audit, yahoo))
     summary["hits"] = len(rows)
     downloaded = len(info) - summary["failed"]
-    summary["degraded"] = bool(downloaded and summary["gapped"] > downloaded * 0.2)
+    summary["degraded"] = (summary["degraded"]
+                           or bool(downloaded and summary["gapped"] > downloaded * 0.2))
     return rows, charts, summary

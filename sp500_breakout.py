@@ -75,6 +75,7 @@ setup_ca_bundle()
 
 import pandas as pd  # noqa: E402
 import yfinance as yf  # noqa: E402
+from market_sessions import completed_month, session_close  # noqa: E402
 from relative_strength import (  # noqa: E402
     MARKET_COUNTRY,
     RS_CSV_COLUMNS,
@@ -352,17 +353,22 @@ def average_turnover(df, window: int = 60) -> float:
     return float(value) if pd.notna(value) else 0.0
 
 
-def drop_partial_bar(df, market: str):
+def drop_partial_bar(df, market: str, as_of=None):
     """장이 아직 안 끝났으면 미완성인 당일 봉을 버린다.
 
     장중 봉은 거래량이 덜 쌓여 있어 그대로 쓰면 거래량 급증 판정이 왜곡된다.
     """
-    if len(df) < 2:
+    if df.empty:
         return df
     spec = MARKETS[market]
-    now = datetime.now(ZoneInfo(spec["tz"]))
-    if df.index[-1].date() == now.date() and (now.hour, now.minute) < spec["close"]:
-        return df.iloc[:-1]
+    now = pd.Timestamp(as_of if as_of is not None else datetime.now(ZoneInfo(spec["tz"])))
+    if now.tzinfo is None:
+        raise ValueError("as_of must be timezone-aware")
+    now = now.tz_convert(spec["tz"])
+    if df.index[-1].date() == now.date():
+        close = session_close(market, now.date())
+        if close is None or now < close:
+            return df.iloc[:-1]
     return df
 
 
@@ -376,7 +382,21 @@ def price_cache_path(tickers, start, end):
     return CACHE_DIR / f"prices_{key}.pkl"
 
 
-def download_prices(tickers, start, end, chunk=60, use_cache=True, threads=True):
+def price_cache_is_complete(prices, market, stored_at):
+    """A session dated row cached before its close is not a completed bar."""
+    stamp = pd.Timestamp(stored_at)
+    if pd.isna(stamp) or stamp.tzinfo is None:
+        return False
+    for frame in prices.values():
+        if frame.empty:
+            continue
+        close = session_close(market, frame.index[-1].date())
+        if close is None or stamp < close:
+            return False
+    return True
+
+
+def download_prices(tickers, start, end, chunk=60, use_cache=True, threads=True, *, market=None):
     """티커별 OHLCV DataFrame(dict) 반환.
 
     묶음으로 두 번 받아보고, 그래도 빠진 종목은 개별 요청으로 한 번 더 시도한다.
@@ -392,6 +412,9 @@ def download_prices(tickers, start, end, chunk=60, use_cache=True, threads=True)
                     raise ValueError("invalid price cache")
                 cached = {t: df for t, df in cached.items()
                           if t in tickers and isinstance(df, pd.DataFrame) and not df.empty}
+                if market is not None and not price_cache_is_complete(
+                        cached, market, pd.Timestamp(cache_path.stat().st_mtime, unit="s", tz="UTC")):
+                    raise ValueError("cached session was downloaded before its close")
                 download_prices.last_failed = sorted(set(tickers) - set(cached))
                 print(f"  캐시 사용 ({cache_path.name})")
                 return cached
@@ -518,13 +541,27 @@ def missing_price_sessions(prices, window, since=None):
             if any(day >= min(have) for day in required - have)}
 
 
-def recover_price_sessions(prices, market, start, end, window, since=None, price_basis="adj"):
+def recover_price_sessions(prices, market, start, end, window, since=None, price_basis="adj", *,
+                           required_end=None, as_of=None):
     """One bounded, uncached, serial retry for nonempty but incomplete feeds.
 
     Replace the whole history only after all known required sessions return.
     Splicing a new adjusted-price fragment into an old adjustment basis is unsafe.
     """
-    gaps = missing_price_sessions(prices, window, since)
+    def required_gaps(feeds):
+        result = missing_price_sessions(feeds, window, since)
+        if required_end is not None:
+            endpoint = pd.Timestamp(required_end).normalize()
+            for ticker, frame in feeds.items():
+                index = frame.index.tz_localize(None) if frame.index.tz is not None else frame.index
+                index = index.normalize()
+                # A pre-listing session is not a supplier gap. Empty histories
+                # remain ineligible and are counted by the monthly scanner.
+                if len(index) and index.min() <= endpoint and endpoint not in index:
+                    result[ticker] = sorted(set(result.get(ticker, [])) | {endpoint})
+        return result
+
+    gaps = required_gaps(prices)
     if not gaps:
         return prices, {"detected": 0, "repaired": 0, "remaining": 0, "missingDates": []}
     missing_dates = sorted({day.date().isoformat() for days in gaps.values() for day in days})
@@ -537,7 +574,7 @@ def recover_price_sessions(prices, market, start, end, window, since=None, price
         frame = fresh.get(ticker)
         if frame is None or frame.empty:
             continue
-        frame = drop_partial_bar(frame, market).sort_index()
+        frame = drop_partial_bar(frame, market, as_of=as_of).sort_index()
         index = frame.index.tz_localize(None) if frame.index.tz is not None else frame.index
         frame = frame.copy()
         frame.index = index.normalize()
@@ -559,7 +596,7 @@ def recover_price_sessions(prices, market, start, end, window, since=None, price
             continue
         repaired[ticker] = frame
         count += 1
-    remaining = missing_price_sessions(repaired, window, since)
+    remaining = required_gaps(repaired)
     print(f"[{MARKETS[market]['label']}] 누락 이력 복구 {count}/{len(gaps)}종목 · "
           f"재검사 잔여 {len(remaining)}종목", flush=True)
     return repaired, {"detected": len(gaps), "repaired": count,
@@ -967,11 +1004,16 @@ def main() -> int:
 
         print(f"\n[{spec['label']}] 대상 {len(meta)}종목")
         prices = download_prices(meta["yahoo"].tolist(), start_date, end_date,
-                                 use_cache=not args.no_cache)
+                                 use_cache=not args.no_cache, market=mk)
         n_failed = len(set(meta["yahoo"]) - set(prices))
+        # Freeze one live instant for this market's bar cutoff and month choice.
+        market_as_of = datetime.now(ZoneInfo(spec["tz"]))
+        monthly_target, monthly_endpoint = None, None
+        if args.with_monthly and not args.date:
+            monthly_target, monthly_endpoint = completed_month(mk, market_as_of)
         # Monthly charts also show the latest completed daily close. Remove the
         # in-progress daily bar before either strategy consumes the same feed.
-        prices = {t: drop_partial_bar(df, mk) for t, df in prices.items()}
+        prices = {t: drop_partial_bar(df, mk, as_of=market_as_of) for t, df in prices.items()}
         downloaded_prices = prices
         download_tickers = meta["yahoo"].tolist()
 
@@ -993,12 +1035,13 @@ def main() -> int:
 
         # Validate and recover before monthly bars, RS, or daily signals consume
         # the data. Nonempty responses and cache hits can still omit sessions.
-        monthly_as_of = end_date if args.date else datetime.now(ZoneInfo(spec["tz"]))
+        monthly_as_of = end_date if args.date else market_as_of
         monthly_since = ((pd.Period(pd.Timestamp(monthly_as_of).date(), freq="M") - 16)
                          .start_time if args.with_monthly else None)
         quality_window = max(args.ma, args.vol_window) + args.lookback + 1
         prices, recovery = recover_price_sessions(
-            prices, mk, start_date, end_date, quality_window, monthly_since, args.price_basis)
+            prices, mk, start_date, end_date, quality_window, monthly_since, args.price_basis,
+            required_end=monthly_endpoint, as_of=market_as_of)
         if recovery["repaired"] and not args.no_cache:
             try:
                 downloaded_prices.update(prices)
@@ -1013,10 +1056,11 @@ def main() -> int:
         if args.with_monthly:
             from monthly_breakout import scan_monthly_market
 
-            # On the first KST day, the US can still be trading the previous month.
-            # Use each market's local calendar so that a partial month is never final.
-            monthly_as_of = end_date if args.date else datetime.now(ZoneInfo(spec["tz"]))
-            mr, mc, ms = scan_monthly_market(prices, meta, mk, monthly_as_of, args.price_basis)
+            # Live runs switch after the last exchange session closes, not after
+            # local midnight. Date-only --date keeps its historical convention.
+            mr, mc, ms = scan_monthly_market(
+                prices, meta, mk, monthly_as_of, args.price_basis,
+                target_month=monthly_target, expected_last_session=monthly_endpoint)
             monthly_rows.extend(mr)
             monthly_charts.extend(mc)
             monthly_markets.append(ms)
