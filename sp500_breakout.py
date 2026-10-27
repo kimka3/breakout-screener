@@ -107,6 +107,29 @@ def _http_get(url: str, timeout: int = 30, encoding: str | None = None) -> str:
         return raw.decode(encoding or "utf-8", errors="replace")
 
 
+def _http_post(url: str, data: dict[str, str], *, referer: str,
+               timeout: int = 30) -> str:
+    """공식 ETF 구성내역의 폼 조회. 기존 TLS 검증과 전송 경로를 유지한다."""
+    headers = {"Referer": referer, "X-Requested-With": "XMLHttpRequest"}
+    try:
+        from curl_cffi import requests as creq
+
+        resp = creq.post(url, data=data, headers=headers,
+                         impersonate="chrome", timeout=timeout)
+        resp.raise_for_status()
+        return resp.text
+    except ImportError:
+        import urllib.parse
+        import urllib.request
+
+        body = urllib.parse.urlencode(data).encode("ascii")
+        req = urllib.request.Request(url, data=body, headers={
+            **headers, "User-Agent": "Mozilla/5.0",
+            "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+        })
+        return urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8")
+
+
 
 def _read_cached_csv(path: Path, max_age_days: float = 7, **kw):
     """캐시 CSV 를 읽되, 없거나 오래됐거나 읽을 수 없으면 None.
@@ -157,7 +180,8 @@ def load_sp500(refresh: bool = False) -> pd.DataFrame:
 
 
 KOSDAQ150_CSV = CACHE_DIR / "kosdaq150_constituents.csv"
-KODEX_KOSDAQ150 = "https://www.samsungfund.com/api/v1/kodex/product/2ETF54.do"
+KIWOOM_KOSDAQ150 = "https://www.kiwoometf.com/service/etf/KO02010200M?gcode=316670"
+KIWOOM_KOSDAQ150_PDF = "https://www.kiwoometf.com/service/etf/KO02010200MAjax4"
 
 
 KRX_CORP_LIST = "https://kind.krx.co.kr/corpgeneral/corpList.do"
@@ -216,7 +240,7 @@ def load_kospi_all(refresh: bool = False) -> pd.DataFrame:
 
 
 def _validate_kosdaq150(df: pd.DataFrame) -> pd.DataFrame:
-    """KODEX PDF가 현금이나 일부 종목만 담긴 응답이면 사용하지 않는다."""
+    """공식 ETF PDF가 현금이나 일부 종목만 담긴 응답이면 사용하지 않는다."""
     import re
 
     required = {"ticker", "name", "sector"}
@@ -233,11 +257,66 @@ def _validate_kosdaq150(df: pd.DataFrame) -> pd.DataFrame:
     return checked
 
 
+def _kiwoom_kosdaq150_date(page: str) -> date:
+    """요약 목록이 아닌 해당 상품의 공시 기준일로 전체 PDF 목록을 조회한다."""
+    import re
+    from lxml import html
+
+    root = html.fromstring(page)
+    title = "".join("".join(root.xpath("//title/text()")).split())
+    benchmark = root.xpath('//dt[normalize-space(.)="기초지수"]/following-sibling::dd[1]')
+    benchmark_text = "".join("".join(node.itertext()) for node in benchmark)
+    benchmark_text = "".join(benchmark_text.split()).upper()
+    # 가격/운용성과의 공용 스크립트는 별도 내부 펀드번호를 사용한다.
+    # 실제 전체 구성내역을 조회하는 함수의 상품코드만 확인한다.
+    fund_codes = re.findall(
+        r"\bfunction\s+fnPdfDate\s*\(\s*\)\s*\{\s*"
+        r"(?:var|let|const)\s+fundCode\s*=\s*['\"]([^'\"]+)['\"]", page)
+    basis_dates = root.xpath('//input[@id="pdfDt"]/@value')
+    if (title.rsplit("|", 1)[-1] != "KIWOOM코스닥150" or fund_codes != ["316670"]
+            or benchmark_text != "KOSDAQ150지수" or len(basis_dates) != 1
+            or re.fullmatch(r"\d{4}-\d{2}-\d{2}", basis_dates[0]) is None):
+        raise ValueError("예상한 KIWOOM 코스닥150 상품·기준일이 아닙니다")
+    return date.fromisoformat(basis_dates[0])
+
+
+def _kiwoom_kosdaq150_holdings(payload: dict, basis_date: date) -> pd.DataFrame:
+    import re
+
+    holdings = payload.get("pdfList") if isinstance(payload, dict) else None
+    if not isinstance(holdings, list):
+        raise ValueError("KIWOOM 구성내역 목록 형식이 유효하지 않습니다")
+    rows = []
+    seen = set()
+    expected_date = basis_date.strftime("%Y.%m.%d")
+    for holding in holdings:
+        if not isinstance(holding, dict):
+            raise ValueError("KIWOOM 구성내역 행 형식이 유효하지 않습니다")
+        isin = holding.get("gcode")
+        if isin == "KRD010010001":  # 현금은 주식 유니버스에 넣지 않는다.
+            continue
+        if not isinstance(isin, str) or re.fullmatch(r"KR7[0-9][0-9A-Z]{5}\d{3}", isin) is None:
+            raise ValueError("KIWOOM 구성내역의 주식 식별자가 유효하지 않습니다")
+        if holding.get("itemCode") not in (None, "", isin):
+            raise ValueError("KIWOOM 구성내역의 주식 식별자가 일치하지 않습니다")
+        ticker = isin[3:9]
+        name = holding.get("itemTitle")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("KIWOOM 구성내역의 종목명이 유효하지 않습니다")
+        if holding.get("businessDate") != expected_date:
+            raise ValueError("KIWOOM 구성내역의 기준일이 상품 공시일과 일치하지 않습니다")
+        if ticker in seen:
+            raise ValueError("KIWOOM 구성내역에 중복 종목이 있습니다")
+        seen.add(ticker)
+        rows.append({"ticker": ticker, "name": name.strip(), "sector": ""})
+    return _validate_kosdaq150(pd.DataFrame(rows, columns=["ticker", "name", "sector"]))
+
+
 def load_kosdaq150(refresh: bool = False) -> pd.DataFrame:
-    """KODEX 코스닥150의 공개 PDF 구성내역에서 종목 코드와 이름을 받는다.
+    """KIWOOM 코스닥150의 공식 전체 PDF 구성내역에서 코드와 이름을 받는다.
 
     KRX 구성종목 API는 로그인 세션이 필요해 무인 GitHub Actions에 맞지 않는다.
-    KODEX 2ETF54 응답은 현금 행을 제외하면 코스닥150 주식 150개를 제공한다.
+    상품·기초지수·기준일을 확인하고 현금을 제외한 고유 주식 150개만 사용한다.
     """
     if not refresh:
         cached = _read_cached_csv(KOSDAQ150_CSV, dtype={"ticker": str})
@@ -248,37 +327,11 @@ def load_kosdaq150(refresh: bool = False) -> pd.DataFrame:
                 print(f"[warn] 코스닥150 캐시가 유효하지 않아 새로 받습니다: {exc}", file=sys.stderr)
 
     try:
-        import re
-
-        payload = json.loads(_http_get(KODEX_KOSDAQ150))
-        product = payload.get("info", {}).get("product", {})
-        pdf = payload.get("pdf", {})
-        holdings = pdf.get("list")
-        product_name = (str(product.get("fNm") or "") + " "
-                        + str(product.get("bmIdx") or "")).replace(" ", "")
-        basis_date = str(pdf.get("gijunYMD") or "")
-        if (product.get("fId") != "2ETF54" or "코스닥150" not in product_name
-                or re.fullmatch(r"\d{8}", basis_date) is None or not isinstance(holdings, list)):
-            raise RuntimeError("예상한 KODEX 코스닥150 응답이 아닙니다")
-        for count_field in ("totalCnt", "nowCnt"):
-            try:
-                if int(pdf[count_field]) != len(holdings):
-                    raise RuntimeError("KODEX 구성내역 응답이 일부만 내려왔습니다")
-            except (KeyError, TypeError, ValueError):
-                raise RuntimeError("KODEX 구성내역 전체 건수를 확인할 수 없습니다") from None
-
-        found = {}
-        for holding in holdings:
-            if not isinstance(holding, dict):
-                continue
-            code = str(holding.get("itmNo") or "").strip().upper()
-            name = str(holding.get("secNm") or "").strip()
-            if re.fullmatch(r"[A-Z0-9]{6}", code) and name:
-                found.setdefault(code, name)
-
-        df = pd.DataFrame({"ticker": list(found), "name": list(found.values())})
-        df["sector"] = ""
-        df = _validate_kosdaq150(df)
+        basis_date = _kiwoom_kosdaq150_date(_http_get(KIWOOM_KOSDAQ150))
+        payload = json.loads(_http_post(KIWOOM_KOSDAQ150_PDF, {
+            "schGubun1": "316670", "startDate": basis_date.strftime("%Y%m%d"),
+        }, referer=KIWOOM_KOSDAQ150))
+        df = _kiwoom_kosdaq150_holdings(payload, basis_date)
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         df.to_csv(KOSDAQ150_CSV, index=False, encoding="utf-8")
         return df
