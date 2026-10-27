@@ -75,6 +75,7 @@ setup_ca_bundle()
 
 import pandas as pd  # noqa: E402
 import yfinance as yf  # noqa: E402
+from kiwoom_tls import request_with_kiwoom_chain  # noqa: E402
 from market_sessions import completed_month, session_close  # noqa: E402
 from relative_strength import (  # noqa: E402
     MARKET_COUNTRY,
@@ -96,7 +97,7 @@ def _http_get(url: str, timeout: int = 30, encoding: str | None = None) -> str:
     try:
         from curl_cffi import requests as creq
 
-        resp = creq.get(url, impersonate="chrome", timeout=timeout)
+        resp = request_with_kiwoom_chain(creq.get, url, impersonate="chrome", timeout=timeout)
         resp.raise_for_status()
         return resp.content.decode(encoding, errors="replace") if encoding else resp.text
     except ImportError:
@@ -114,8 +115,8 @@ def _http_post(url: str, data: dict[str, str], *, referer: str,
     try:
         from curl_cffi import requests as creq
 
-        resp = creq.post(url, data=data, headers=headers,
-                         impersonate="chrome", timeout=timeout)
+        resp = request_with_kiwoom_chain(
+            creq.post, url, data=data, headers=headers, impersonate="chrome", timeout=timeout)
         resp.raise_for_status()
         return resp.text
     except ImportError:

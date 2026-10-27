@@ -245,6 +245,13 @@ python -m unittest discover -s tests -v
 
 Windows 인증서 저장소를 PEM 번들(`.cache/system-ca-bundle.pem`)로 내보내 `CURL_CA_BUNDLE` / `REQUESTS_CA_BUNDLE` 에 자동 설정합니다. 별도 설정 없이 동작합니다.
 
+KIWOOM 서버가 공개 중간 인증서를 빠뜨려 Linux에서 issuer 체인 검증이 실패한
+경우에만 고정된 Sectigo 공개 중간 인증서를 보완해 한 번 재시도합니다.
+인증서 SHA-256과 기존 신뢰 루트에 대한 서명·유효기간을 먼저 검증하며,
+다른 호스트·만료·호스트명 불일치에는 적용하지 않습니다. 검증을 끄거나 전역 CA
+환경변수를 바꾸지 않습니다. 이 보완 경로는 GitHub Ubuntu 러너에 기본 제공되는
+`openssl` 명령을 사용하고, 해당 명령이나 인증서 검증이 실패하면 조회도 실패합니다.
+
 ## 2026-10-28 구성종목 수집 복구
 
 삼성자산운용의 기존 상품 요약 API가 주식 29개와 현금 1개만 반환하여,
